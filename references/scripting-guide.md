@@ -518,3 +518,34 @@ declare them in a `param()` block.
   `TargetDir` different from the default system path can leave the two halves of an install (e.g.
   `python.exe` vs `Lib\`) unable to find each other — prefer embeddable/self-contained packages when
   you need a clean, isolated install.
+- **ImmyBot's default script execution context is Windows PowerShell 5.1, not PowerShell 7+** (this
+  is also why `pwsh` isn't guaranteed to exist on a target endpoint — see the `pwsh`-not-found gotcha
+  elsewhere in this project). Any script pushed through ImmyBot (as a catalog script, ad-hoc run, or
+  a script called by one that ends up running locally) that uses PS7-only syntax will fail to
+  **parse** — not just at runtime — with a generic-looking `Unexpected token` error that doesn't
+  mention the real cause. Confirmed offenders: the null-coalescing operator `??`, the null-coalescing
+  assignment `??=`, the ternary operator `? :`, and the null-conditional member access `?.`. Write
+  `if/elseif/else` instead of `??`/ternary, and `if ($x) { $x.Prop }` instead of `$x?.Prop`. Test any
+  script you're unsure about by running it as an ad-hoc script against a real computer (see
+  `api-reference.md`'s "Testing a script or task against a real computer" section) rather than only
+  syntax-checking it locally in a PS7 terminal, since PS7 will happily parse and run PS5.1-illegal
+  syntax without complaint.
+  PS7 syntax/cmdlets *are* reachable when you actually need them: from the ImmyBot Discord (Noah
+  Tatum, 2024-03-13, on `New-SshLocalPortForward` failing under 5.1 but working under 7) — "You could
+  always call `pwsh` within `Invoke-ImmyCommand`... this at least works." i.e. wrap the PS7-dependent
+  logic in its own scriptblock and invoke it via `pwsh -Command { ... }` (or a saved `.ps1`) from
+  inside the PS5.1 script, rather than trying to write PS7 syntax directly in the outer script body.
+  This still depends on `pwsh` actually being installed on that endpoint — don't assume it's there
+  (see the `pwsh`-not-found gotcha) — verify or install it first if you go this route.
+- A background/service process launched with `python.exe` (not `pythonw.exe`) spawns a visible
+  console window — which, on a machine also used for GUI automation (computer-use style
+  clicking/typing), can silently steal foreground/input focus from whatever app you're trying to
+  automate. Symptom: your target app renders correctly in screenshots (still visually on top) but
+  clicks/keystrokes never seem to register, because they're actually landing on your own background
+  console. Diagnose by checking `GetForegroundWindow()` before/after a simulated click, not just by
+  trusting that a click "should" go to whatever's visually on top. Fix: use `pythonw.exe` for any
+  long-running background automation process, and don't assume a single `SetForegroundWindow` call
+  early in the process lifetime is enough to keep a target app focused — Windows' foreground-lock
+  restriction can silently ignore `SetForegroundWindow` from a background/automated process; use
+  `AttachThreadInput` around it for a reliable steal, and retry until the target window actually
+  exists rather than assuming a fixed delay after launch is long enough.

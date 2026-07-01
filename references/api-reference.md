@@ -228,6 +228,31 @@ Invoke-RestMethod -Uri "$immyBase/api/v1/computers?name=PCH-LT08&pageSize=5" -He
 Don't assume every list endpoint shares the same query-param convention — check
 `$sw.paths.'/api/v1/<route>'.get.parameters` for the specific route before guessing.
 
+## Reading and updating a deployment's parameter overrides
+
+A "deployment" in the UI (assigning a software/maintenance task to a target with specific
+`taskParameterValues`, e.g. API keys or config baked into an onboarding task) is a **target
+assignment** in the API, id shown in the UI URL. There is no plain `GET /api/v1/deployments/{id}`
+— it 404s to the SPA shell (returns the `index.html`, not JSON). Two ways to actually read one:
+
+- **Cheapest**: `GET /api/v1/maintenance-sessions/{sessionId}` for any session that ran under that
+  deployment — `.sessionJobArgs.maintenanceItem.details.taskConfigurationDetails.taskParameterValues`
+  has the exact param values that session ran with (`{ ParamName: { value, allowOverride,
+  requiresOverride } }`). Caveat: this is a **historical snapshot** from whenever that session was
+  created, not necessarily what the deployment is currently configured to. If the deployment's
+  params were edited after that session ran, this will show you the stale pre-edit values — cross-
+  check against a more recent session, or the UI, before trusting it as current.
+- To change values: `POST /api/v1/target-assignments/{deploymentId}/change-request`
+  (`CreateTargetAssignmentChangeRequestRequest`, needs `deployments:manage_change_requests`
+  permission). **This is not a partial patch** — the `payload` is a full
+  `CreateLocalTargetAssignmentPayload` covering the assignment's target type/scope
+  (`targetType`/`target`/`targetCategory`/`tenantId`), maintenance identity
+  (`maintenanceIdentifier`/`maintenanceType`), and `taskParameterValues`, all required together.
+  Getting scope fields wrong risks silently re-targeting the assignment rather than just updating
+  its params. Don't attempt this from a values-only guess — confirm the assignment's full current
+  shape (ideally by having someone pull it up in the UI, which shows the live values directly) before
+  constructing the payload, or just make the edit through the UI instead.
+
 ## Other useful route families (seen in Swagger, not yet deep-dived)
 
 - `/api/v1/dynamic-provider-types/global*` — integration/provider type definitions
