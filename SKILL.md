@@ -1,7 +1,7 @@
 ---
 name: immybot
 description: This skill should be used when working with ImmyBot — an RMM/MSP automation platform. Covers calling the ImmyBot REST API (OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions), and writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks with test-get-set, Invoke-ImmyCommand and other built-in Immy cmdlets). Trigger on "ImmyBot", "immy.bot", "push a script to Immy", "detection script", "dynamic versions script", "config task", "maintenance task", "Invoke-ImmyCommand", or RMM software-deployment automation.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # ImmyBot
@@ -59,6 +59,14 @@ $sw.components.schemas.<SomeEnum>                          # enum meanings, in p
   access to `Get-ImmyComputer`, tenant data, etc.) hands a scriptblock to `Invoke-ImmyCommand` to
   actually execute *on the target endpoint*. Use `$using:` to pass variables across that boundary,
   exactly like `Invoke-Command`. Full verified parameter list in `references/scripting-guide.md`.
+- **"Onboarding" is ImmyBot's own term for a *device* lifecycle state** — a new/reimaged computer
+  being brought under management for the first time (`NeedsOnboarding` status, the onboarding
+  wizard, `set-to-needs-onboarding`/`skip-onboarding` endpoints, `onboardingOnly` on tasks). If your
+  own project also uses the word "onboarding" for something else (e.g. onboarding a *person* into
+  apps/accounts), these are unrelated concepts that happen to share a name — don't reach for
+  ImmyBot's onboarding-flow endpoints just because your task is also called "onboarding." A
+  `MaintenanceTask`/`Software` deployment with `onboardingOnly: false` runs through completely
+  normal maintenance-session mechanics, with no connection to the device-onboarding feature at all.
 
 Read `references/scripting-guide.md` before writing any ImmyBot script — it has the full
 `ScriptCategory`/`ScriptExecutionContext` semantics, the verified `Invoke-ImmyCommand` signature, all
@@ -98,3 +106,14 @@ the script-push pattern, ad-hoc script execution, and maintenance-session rerun/
   endpoint via `Invoke-ImmyCommand { ... } -Verbose`, returning a version string (or `$null` if not
   installed) — not a boolean. See `Detect-GoogleChrome` (`Detect-Software "Chrome"`, a built-in helper)
   and the 1Password example in `references/scripting-guide.md` for both styles.
+- **`POST /api/v1/scripts/run` has a hard ~120s gateway timeout** (confirmed live, `504 Gateway
+  Timeout` / `stream timeout`, not caller VPN/network related) — it's a synchronous streaming call
+  that blocks until the script finishes. For anything that legitimately runs longer, make the
+  script itself return fast (a "submit and don't wait" mode) and poll the real downstream result
+  separately, rather than fighting this endpoint's timeout. Full pattern in `references/api-reference.md`.
+- **Run API calls from `pwsh` (PowerShell 7+), not legacy `powershell.exe` (5.1).** Confirmed live:
+  `$scriptObject | ConvertTo-Json -Depth 20` hung indefinitely (60s+, no error, no timeout) in
+  Windows PowerShell 5.1 on a trivial ~6KB flat object with zero nested structure — this wasn't a
+  slow API, it never even reached the HTTP call. The identical script ran instantly in `pwsh`. If a
+  GET-mutate-POST script "hangs" with no error, suspect this before suspecting the network — check
+  which `powershell`/`pwsh` binary is actually running it before debugging anything else.

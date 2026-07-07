@@ -79,6 +79,13 @@ Same GET-mutate-POST pattern works for `/api/v1/scripts/global/{id}` if you have
 access. There's also `POST /api/v1/scripts/duplicate` and a local→global migration pair:
 `/api/v1/scripts/local/{id}/migrate-local-to-global` (+ `-what-if` dry-run variant).
 
+**If this hangs with no error, check your PowerShell binary before anything else.** Confirmed live:
+the exact GET-mutate-POST sequence above hung for 60s+ inside `ConvertTo-Json -Depth 20` — before
+the POST even fired — when run via legacy `powershell.exe` (5.1), on a plain ~6KB object with no
+nested structure to justify it. Switching to `pwsh` (PowerShell 7+) fixed it instantly, no other
+changes. Don't waste time adding `-TimeoutSec`/try-catch/progress-bar workarounds first — confirm
+which binary is actually running the script.
+
 ## Software (global catalog)
 
 ```
@@ -210,6 +217,56 @@ parameterOverrides, scriptCategory, scriptExecutionContext, scriptLanguage, vari
 (`parameterOverrides = @{}`, `variables = @{}`). Response streams the script's console output as
 plain text — read it back directly, no JSON envelope to unwrap.
 
+**A simpler, safer alternative to hand-picking enum string names for the `script` object**: if
+you're re-running an *existing* saved script, GET it first (`/api/v1/scripts/local/{id}`) and pass
+its own `id, name, action, databaseType, filterScriptMode, outputType, scriptCategory,
+scriptLanguage, scriptExecutionContext` straight through into the run payload unchanged. Those are
+values the API itself already accepted and stored for that exact object, so there's zero risk of
+picking the wrong enum int or string name — you're not deriving anything, just replaying what's
+already known-valid. Only override `timeout`/`parameterOverrides`/`variables`.
+
+**Hard ~120s gateway timeout on this endpoint — confirmed live, not a fluke.** `/api/v1/scripts/run`
+is a synchronous streaming call: the HTTP response doesn't come back until the script finishes, and
+this tenant's infrastructure kills that stream at almost exactly 2 minutes with a `504 Gateway
+Timeout` / `stream timeout`, regardless of client-side `-TimeoutSec`. This is **not** related to a
+caller's own VPN or network — confirmed by disconnecting/reconnecting VPN mid-debugging and seeing
+the identical failure. For a script that genuinely needs longer than ~120s (e.g. one that itself
+submits a job to another system and polls for that job's result), don't fight this — restructure the
+call:
+1. Have the script take a "submit and return immediately" mode (a parameter like
+   `-WaitForResults $false`) instead of blocking on its own internal poll loop.
+2. Fire it via `/scripts/run` with that override — returns in seconds since the script itself
+   returns in seconds.
+3. Poll the *actual downstream system* for the real result yourself, separately, using whatever
+   API that system exposes — not through this ImmyBot endpoint, which only ever reports the
+   console output of the run itself, not anything the script kicked off asynchronously.
+
+**`maintenanceTaskId`/`maintenanceTaskType` are optional and purely for parameter validation** — per
+the schema description: "so parameter overrides can be validated against the task's declared
+parameters." Omit both entirely when running a plain software install/detection script that isn't
+wired to a maintenance task; only `computerId` + the `script` object are required in that case.
+
+**A `Software` item can have its own linked `maintenanceTaskId`** (a distinct field on the software
+record, e.g. a post-install configuration step) — in that case, one `target-assignment` deploying
+the software carries `taskParameterValues` covering **both** the software's own install-script
+parameters *and* the linked maintenance task's parameters, all in one flat dictionary, even though
+they're consumed by two completely different scripts. Don't assume a target-assignment's parameters
+belong to only one script — check both the software record's own script IDs (`installScriptId`,
+`detectionScriptId`, etc.) and its `maintenanceTaskId` to find every script that might read from
+that same parameter set.
+
+**Params baked into a local config file at install time are not "live" — re-running the install
+script is the only way changes propagate.** If a software's install script writes any of its
+parameters into a file on the endpoint (a `.env`, a registry value, anything read by a *different*
+script that runs later), editing the target-assignment's parameter value in the UI/API does nothing
+to an already-installed machine — the stale value stays on disk until the install script actually
+runs again. This bit us twice in one session: once as a hard crash (an already-running background
+process using old parameter-shaped code couldn't handle a new API contract and died silently), and
+again as a stale API key that *looked* fixed (target-assignment updated correctly) but wasn't,
+because the already-installed `.env` still had the pre-fix value. If a "fix" doesn't take effect,
+check whether the consuming process needs a fresh install/restart to pick it up, before assuming the
+parameter update itself failed.
+
 Use this same mechanism to build **strictly read-only previews**: write a variant of the script
 that only reports what it *would* do (no `Remove-Item`/mutating calls at all) and run it the same
 way — safer than trusting `-WhatIf`/`ShouldProcess` plumbing on a script you haven't proven yet,
@@ -227,6 +284,37 @@ Invoke-RestMethod -Uri "$immyBase/api/v1/computers?name=PCH-LT08&pageSize=5" -He
 ```
 Don't assume every list endpoint shares the same query-param convention — check
 `$sw.paths.'/api/v1/<route>'.get.parameters` for the specific route before guessing.
+
+## Reading and updating a deployment's parameter overrides
+
+A "deployment" in the UI (assigning a software/maintenance task to a target with specific
+`taskParameterValues`, e.g. API keys or config baked into an onboarding task) is a **target
+assignment** in the API, id shown in the UI URL. There is no plain `GET /api/v1/deployments/{id}`
+— it 404s to the SPA shell (returns the `index.html`, not JSON). Two ways to actually read one:
+
+- **Cheapest**: `GET /api/v1/maintenance-sessions/{sessionId}` for any session that ran under that
+  deployment — `.sessionJobArgs.maintenanceItem.details.taskConfigurationDetails.taskParameterValues`
+  has the exact param values that session ran with (`{ ParamName: { value, allowOverride,
+  requiresOverride } }`). Caveat: this is a **historical snapshot** from whenever that session was
+  created, not necessarily what the deployment is currently configured to. If the deployment's
+  params were edited after that session ran, this will show you the stale pre-edit values — cross-
+  check against a more recent session, or the UI, before trusting it as current.
+- **`taskParameterValues` returns every field in cleartext, including `Password`-type params and API
+  keys** — same shape as any other value, no masking. Before printing/logging a target-assignment
+  response, filter out fields you know are sensitive (by name — `Password`, `*ApiKey`, `*Secret`,
+  `*Token`, etc.) rather than dumping the whole object, exactly like the Railway `variables` query
+  gotcha in `SKILL.md`. Confirmed live: an unfiltered `GET /api/v1/target-assignments/{id}` dump put
+  a real Anthropic API key and a real account password straight into a chat transcript.
+- To change values: `POST /api/v1/target-assignments/{deploymentId}/change-request`
+  (`CreateTargetAssignmentChangeRequestRequest`, needs `deployments:manage_change_requests`
+  permission). **This is not a partial patch** — the `payload` is a full
+  `CreateLocalTargetAssignmentPayload` covering the assignment's target type/scope
+  (`targetType`/`target`/`targetCategory`/`tenantId`), maintenance identity
+  (`maintenanceIdentifier`/`maintenanceType`), and `taskParameterValues`, all required together.
+  Getting scope fields wrong risks silently re-targeting the assignment rather than just updating
+  its params. Don't attempt this from a values-only guess — confirm the assignment's full current
+  shape (ideally by having someone pull it up in the UI, which shows the live values directly) before
+  constructing the payload, or just make the edit through the UI instead.
 
 ## Other useful route families (seen in Swagger, not yet deep-dived)
 
