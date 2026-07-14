@@ -144,46 +144,79 @@ $s = Invoke-RestMethod -Uri "$immyBase/api/v1/maintenance-sessions/<sessionId>" 
 List-style maintenance-session GETs (e.g. `?computerId=X`) return the HTML SPA, not JSON — only
 per-ID GETs work through the API.
 
+### DevExtreme `/dx` grids — how to query them at scale (verified live 2026-07-14)
+
+The `*/dx` endpoints are DevExtreme DataSource endpoints. They take JSON query params
+(URL-encode each): `filter`, `sort`, `select`, `group`, `groupSummary`, `totalSummary`,
+`skip`, `take`, `requireTotalCount`, `requireGroupCount`. Hard-won rules from probing
+`/api/v1/maintenance-actions/dx` on a tenant with ~74k actions/day:
+
+- **`requireTotalCount=true` is the expensive/timeout part, NOT the date filter.** It
+  forces a full `COUNT(*)` over the filtered set. Live: an hour window counted in 0.4s,
+  a day (74,625 rows) took 38s, a week timed out (>70s). The row fetch itself is fast.
+  **Never send `requireTotalCount=true` on a wide window** — page with
+  `requireTotalCount=false` and stop on a short page.
+- **Wide + sorted raw fetches also choke.** A week-wide `sort` + `take=1000` (no count)
+  still timed out — sorting ~500k rows to return the first page is too much. Keep raw
+  windows narrow (hour/day), or aggregate server-side (below).
+- **Filter/group on the INTEGER enum fields, not the string `*Name` variants.**
+  `group=`/`filter=` on `actionTypeName`, `resultName`, or `maintenanceTypeName` return
+  **HTTP 500**. The underlying ints (`actionType`, `result`, `maintenanceType`) group and
+  filter fine. The `*Name` strings ARE still returned in row data when listed in
+  `select` — they just can't be grouped/filtered.
+- **`select=["colA","colB",...]` works** and cuts payload/serialization a lot on wide rows.
+- **No practical `take` cap:** `take=5000` returned 3,475 rows in one 0.5s call.
+- **Server-side grouping is fast and the big win** for reporting. `group=` (single or
+  nested) + `requireGroupCount=true` + `take=0` returns aggregated buckets, not raw rows:
+  per-tenant counts for a day in ~1.4s, per-app counts in ~0.3s, nested full grain
+  (`[tenantName, maintenanceIdentifier, actionType, result, computerId]`) in ~0.3s.
+  Caveat: DevExtreme `groupSummary`/`totalSummary` support count/sum/min/max/avg but
+  **NOT count-distinct** — get distinct computers by grouping on `computerId` (or nesting
+  it) and reading `groupCount`/subgroup counts, not via a summary.
+
+`maintenanceActions` enum ints (declaration order, confirmed against live volumes):
+- `actionType`: 0=NoAction, 1=Install, 2=Update, 3=Uninstall, 4=Download, 5=Reinstall,
+  6=Downgrade, 7=Undetermined, 8=TaskEnforce, 9=TaskMonitor, 10=TaskAudit
+- `result`: 0=Pending, 1=Success, 2=Failed, 3=Cancelled, 4=Indeterminable, 5=Resolved
+
 ### Reporting on maintenance actions by week
 
-For weekly impact/reporting, do **not** query broad `/api/v1/maintenance-actions/dx` date windows.
-Live testing showed broad action-grid date filters can time out, and unsorted action queries start
-from old 2022-side data. Also, although Swagger lists `maintenanceActions` on
-`GetMaintenanceSessionResponse`, live `GET /api/v1/maintenance-sessions/{sessionId}` responses did
-not include that field.
-
-The proven bounded pattern is the same shape the Immy UI uses:
-
-1. List computer maintenance sessions with `/api/v1/maintenance-sessions/dx`.
-   - Include `sessionType=2`.
-   - Use DevExtreme `filter=` JSON on `createdDate`, not Sieve `Filters=`.
-   - Use `MM/DD/YYYY HH:mm:ss` date strings, matching the UI.
-   - Sort by `createdDate desc`.
-   - `requireTotalCount=true` is useful on the first page to know whether the import is partial.
-2. For each session ID, fetch actions with `/api/v1/maintenance-actions/dx` filtered by
-   `maintenanceSessionId`.
-   - Use DevExtreme `filter=[["maintenanceSessionId","=",1308723]]`.
-   - Do not use Sieve `Filters=maintenanceSessionId==...`; live testing returned 500.
-   - Optional fallback: `/api/v1/maintenance-actions/dx-for-computer/{computerId}` with the same
-     `maintenanceSessionId` filter.
-
-Example:
+**Preferred: action-first, day-windowed, with NoAction filtered server-side.** On a real
+tenant ~95% of action rows are `actionType=0` (NoAction — pass-only checks). Excluding
+them server-side collapses a day from ~74.6k to ~3.5k rows and a week from ~500k to ~29k,
+so a whole day fits in ONE call. This is ~7 calls for a full week, vs one call per session
+(14k+) for the session-first pattern below.
 
 ```powershell
-$sessionFilter = [uri]::EscapeDataString(
-  '[["createdDate",">=","07/06/2026 20:53:21"],"and",["createdDate","<=","07/13/2026 20:53:21"]]'
+# one call per day; loop the 7 days of the week. createdDateUTC is UTC.
+$dayFilter = [uri]::EscapeDataString(
+  '[["createdDateUTC",">=","07/07/2026 00:00:00"],"and",["createdDateUTC","<","07/08/2026 00:00:00"],"and",["actionType","<>",0]]'
 )
-$sessionSort = [uri]::EscapeDataString('[{"selector":"createdDate","desc":true}]')
-$sessions = Invoke-RestMethod -Uri "$immyBase/api/v1/maintenance-sessions/dx?sessionType=2&skip=0&take=50&requireTotalCount=true&sort=$sessionSort&filter=$sessionFilter" -Headers $headers
-
-$actionFilter = [uri]::EscapeDataString('[["maintenanceSessionId","=",1308723]]')
-$actionSort = [uri]::EscapeDataString('[{"selector":"createdDateUTC","desc":true}]')
-$actions = Invoke-RestMethod -Uri "$immyBase/api/v1/maintenance-actions/dx?skip=0&take=250&requireTotalCount=false&sort=$actionSort&filter=$actionFilter" -Headers $headers
+$sort = [uri]::EscapeDataString('[{"selector":"createdDateUTC","desc":true}]')
+$sel  = [uri]::EscapeDataString('["id","parentId","tenantId","tenantName","computerId","actionTypeName","resultName","maintenanceTypeName","maintenanceIdentifier","maintenanceDisplayName","maintenanceSessionId","reason","createdDateUTC"]')
+$actions = Invoke-RestMethod -Uri "$immyBase/api/v1/maintenance-actions/dx?skip=0&take=5000&requireTotalCount=false&sort=$sort&filter=$dayFilter&select=$sel" -Headers $headers
+# if a day ever returns exactly `take` rows, page with skip until a short page.
 ```
 
-When aggregating actions, watch for parent/child rows. To avoid double-counting, build a set of
-action IDs that appear as another action's `parentId`; credit child actions and standalone actions,
-not parent rollup rows.
+Or, for a headline report without pulling rows at all, group server-side (see the `/dx`
+rules above) — e.g. `group=[{"selector":"maintenanceIdentifier","isExpanded":false},{"selector":"actionType","isExpanded":false},{"selector":"result","isExpanded":false}]&requireGroupCount=true&take=0` with the same day+`actionType<>0` filter.
+
+**Fallback: session-first** (only if you specifically need per-session grouping the UI uses):
+1. List sessions with `/api/v1/maintenance-sessions/dx?sessionType=2`, DevExtreme
+   `filter=` on `createdDate` (`MM/DD/YYYY HH:mm:ss` strings, not Sieve `Filters=`), sorted
+   `createdDate desc`.
+2. For each session ID, `/api/v1/maintenance-actions/dx` with
+   `filter=[["maintenanceSessionId","=",1308723]]` (optional fallback
+   `/maintenance-actions/dx-for-computer/{computerId}` with the same filter). Note: an OR
+   filter across multiple `maintenanceSessionId`s returns 500 `NotSupportedException`, so
+   this is genuinely one call per session — avoid it for large weeks.
+
+Also note: although Swagger lists `maintenanceActions` on `GetMaintenanceSessionResponse`,
+live `GET /api/v1/maintenance-sessions/{sessionId}` responses did **not** include that field.
+
+When aggregating actions, watch for parent/child rows. To avoid double-counting, build a set
+of action IDs that appear as another action's `parentId`; credit child actions and standalone
+actions, not parent rollup rows.
 
 ## Creating new scripts and maintenance tasks
 
@@ -220,6 +253,24 @@ params), and POST the whole object back — same GET-mutate-POST shape as script
 (`Number, Text, Boolean, Select, Password, File, Uri, KeyValuePair`) — confirmed empirically that
 for *this* enum the backing ints do match declaration order (Number=0, Text=1, Boolean=2), unlike
 `ScriptCategory`. Still prefer sending/reading the string name over relying on that.
+
+## Deprecating, disabling, or deleting a maintenance task
+
+There is **no per-task "enabled/disabled" flag** on a `MaintenanceTask` — only the per-method
+`testEnabled`/`getEnabled`/`setEnabled` bools. So to **disable** an obsolete task without deleting
+it (reversible, and keeps its history/notes intact), GET the task, set all three of
+`testEnabled`/`getEnabled`/`setEnabled` to `false` (an ad-hoc run then becomes a no-op), prefix the
+`name` with something like `[DEPRECATED - use '<replacement>']`, drop an explanation in `notes`, and
+POST it back to `POST /api/v1/maintenance-tasks/local/{id}`. To **hard-delete** instead, `DELETE
+/api/v1/maintenance-tasks/local/{id}`.
+
+Before disabling/deleting a task, confirm nothing still **deploys** it: pull
+`GET /api/v1/target-assignments?PageSize=5000` and filter for a task-type assignment
+(`maintenanceType == 6`) whose `maintenanceIdentifier == "<taskId>"`. Note that `maintenanceIdentifier`
+is shared across entity types, so filter on **type AND identifier** (a bare `identifier == 27` also
+matches software id 27, etc.). A task only ever run ad-hoc (via the machine's "run task now") has
+**no** target-assignment — those ad-hoc runs show up in the computer's maintenance-action history
+with `assignmentId == 0`, and leave nothing persistent to remove.
 
 ## Testing a script or task against a real computer without deploying it
 
