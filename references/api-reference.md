@@ -144,6 +144,47 @@ $s = Invoke-RestMethod -Uri "$immyBase/api/v1/maintenance-sessions/<sessionId>" 
 List-style maintenance-session GETs (e.g. `?computerId=X`) return the HTML SPA, not JSON — only
 per-ID GETs work through the API.
 
+### Reporting on maintenance actions by week
+
+For weekly impact/reporting, do **not** query broad `/api/v1/maintenance-actions/dx` date windows.
+Live testing showed broad action-grid date filters can time out, and unsorted action queries start
+from old 2022-side data. Also, although Swagger lists `maintenanceActions` on
+`GetMaintenanceSessionResponse`, live `GET /api/v1/maintenance-sessions/{sessionId}` responses did
+not include that field.
+
+The proven bounded pattern is the same shape the Immy UI uses:
+
+1. List computer maintenance sessions with `/api/v1/maintenance-sessions/dx`.
+   - Include `sessionType=2`.
+   - Use DevExtreme `filter=` JSON on `createdDate`, not Sieve `Filters=`.
+   - Use `MM/DD/YYYY HH:mm:ss` date strings, matching the UI.
+   - Sort by `createdDate desc`.
+   - `requireTotalCount=true` is useful on the first page to know whether the import is partial.
+2. For each session ID, fetch actions with `/api/v1/maintenance-actions/dx` filtered by
+   `maintenanceSessionId`.
+   - Use DevExtreme `filter=[["maintenanceSessionId","=",1308723]]`.
+   - Do not use Sieve `Filters=maintenanceSessionId==...`; live testing returned 500.
+   - Optional fallback: `/api/v1/maintenance-actions/dx-for-computer/{computerId}` with the same
+     `maintenanceSessionId` filter.
+
+Example:
+
+```powershell
+$sessionFilter = [uri]::EscapeDataString(
+  '[["createdDate",">=","07/06/2026 20:53:21"],"and",["createdDate","<=","07/13/2026 20:53:21"]]'
+)
+$sessionSort = [uri]::EscapeDataString('[{"selector":"createdDate","desc":true}]')
+$sessions = Invoke-RestMethod -Uri "$immyBase/api/v1/maintenance-sessions/dx?sessionType=2&skip=0&take=50&requireTotalCount=true&sort=$sessionSort&filter=$sessionFilter" -Headers $headers
+
+$actionFilter = [uri]::EscapeDataString('[["maintenanceSessionId","=",1308723]]')
+$actionSort = [uri]::EscapeDataString('[{"selector":"createdDateUTC","desc":true}]')
+$actions = Invoke-RestMethod -Uri "$immyBase/api/v1/maintenance-actions/dx?skip=0&take=250&requireTotalCount=false&sort=$actionSort&filter=$actionFilter" -Headers $headers
+```
+
+When aggregating actions, watch for parent/child rows. To avoid double-counting, build a set of
+action IDs that appear as another action's `parentId`; credit child actions and standalone actions,
+not parent rollup rows.
+
 ## Creating new scripts and maintenance tasks
 
 `POST /api/v1/scripts/local` (`CreateLocalScriptRequestBody`) creates a brand-new script (as
