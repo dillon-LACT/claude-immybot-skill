@@ -113,6 +113,31 @@ Returns `testScriptId`/`getScriptId`/`setScriptId` (+ `testEnabled`/`getEnabled`
 `maintenanceTaskCategory` (Computer/Tenant/Person — which target type the task runs against),
 `isConfigurationTask`, `onboardingOnly`, `executeSerially`, `parameters[]`, supersession chain fields.
 
+### "Runs Against" (task creation UI) → fields — get this right, it's unforgiving
+
+The new-task form's **Runs Against** radio group is the same decision as these fields, and picking
+wrong causes real breakage (see the SKILL.md gotcha; real miss = Deltek shipped as a config task
+when it should have run against computers):
+
+| UI "Runs Against"            | Fields set                                             | Use when |
+| ---------------------------- | ------------------------------------------------------ | -------- |
+| **Computers** (default)      | `maintenanceTaskCategory = Computer`, `isConfigurationTask = false` | Normal task that does work *on the endpoint* — registry/filesystem, enforcing settings, running a script on machines. UI hint: "This is a normal maintenance task." This is the right pick for almost everything. |
+| **Cloud**                    | `maintenanceTaskCategory = Tenant`, `isConfigurationTask = false`   | Task targets the tenant/cloud, not a device. |
+| **People**                   | `maintenanceTaskCategory = Person`, `isConfigurationTask = false`   | Task targets a person, not a device. |
+| **Software (Configuration Task)** | `isConfigurationTask = true`, attached to a Software item      | *Only* when the task exists to inject runtime/parameter configuration into a specific software's install (parameterizing an installer), or to enforce that software's post-install config. More complex; don't reach for it just because your task relates to an app. |
+
+**Why config tasks are a trap (from ImmyBot's docs):** a Configuration Task is **not** selectable on
+the Edit Deployment page and **cannot be deployed on its own** — it only runs when its associated
+Software is detected/installed on the machine (the maintenance session's "Has Configuration Task?"
+branch runs *after* the software install/detect). Mark a task you meant to run everywhere as a config
+task and it will silently never fire as a normal deployment. Config tasks exist to (a) pass command-
+line parameters into a software's install script (leave the test/get/set scripts empty and just
+declare parameters — Immy forwards them to the installer) and/or (b) enforce post-install config via
+the test/get/set pattern.
+
+**Rule of thumb:** unless the task's whole purpose is to inject runtime parameters for an installer,
+choose **Computers**. When in doubt, Computers.
+
 ## Running an ad-hoc script on a specific machine (not via catalog)
 
 ```powershell

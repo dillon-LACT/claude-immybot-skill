@@ -1,7 +1,7 @@
 ---
 name: immybot
 description: This skill should be used when working with ImmyBot — an RMM/MSP automation platform. Covers calling the ImmyBot REST API (OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions), and writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks with test-get-set, Invoke-ImmyCommand and other built-in Immy cmdlets). Trigger on "ImmyBot", "immy.bot", "push a script to Immy", "detection script", "dynamic versions script", "config task", "maintenance task", "Invoke-ImmyCommand", or RMM software-deployment automation.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # ImmyBot
@@ -96,6 +96,23 @@ the script-push pattern, ad-hoc script execution, and maintenance-session rerun/
   on the endpoint) with "param blocks can only be used with metascripts." For System-context
   scripts, declare the task's `parameters[]` explicitly instead; they arrive as pre-set
   script-scope variables (no `param()` block needed) — see `references/api-reference.md`.
+- **When creating a stand-alone maintenance task, the "Runs Against" selector is the single
+  easiest thing to get wrong, and ImmyBot is unforgiving about it.** The four radio options map to
+  the target/type fields: **Computers** (`maintenanceTaskCategory = Computer`,
+  `isConfigurationTask = false`, UI says "This is a normal maintenance task") is a normal task that
+  runs on the endpoint — the correct default for almost everything (registry/filesystem work,
+  enforcing settings, running a script on machines). **Cloud** = `Tenant`, **People** = `Person`
+  (task runs against the tenant/person, not a device). **Software (Configuration Task)** sets
+  `isConfigurationTask = true` and attaches the task to a *Software* item so it can inject
+  runtime/parameter configuration into that software's install — it's more complex and only correct
+  when you are *specifically* parameterizing an installer. **The trap:** a Configuration Task is
+  *not* selectable on the Edit Deployment page and can't be deployed on its own — it only fires when
+  its associated Software is detected/installed on the machine (per ImmyBot's own docs). So a task
+  you meant to run everywhere, marked as a config task, will silently never run as a normal
+  deployment. Rule of thumb: **unless the task exists to inject runtime parameters for an installer,
+  pick Computers.** Real miss (Deltek, 2026-07): it was created as *Software (Configuration Task)*
+  when it should have been *Runs Against: Computers*, so it didn't deploy/run as intended. When in
+  doubt, choose Computers.
 - `GET /api/v1/computers` uses plain `name`/`tenantId` query params, not the `Filters=` Sieve
   syntax that `/scripts` and `/software` use — check each route's own params in Swagger.
 - `POST /api/v1/scripts/run` lets you test a script/task against a real computer with parameter
