@@ -425,6 +425,51 @@ vs. desired state and `return $true`/`$false` — same shape as Hibernation, jus
 A no-op placeholder task (e.g. one gating manual/human steps) can be as simple as `return $true` for
 every method — don't over-engineer a config task that's really just a checklist gate.
 
+### PREFER the built-in `*Should-Be` helpers for registry config tasks (don't hand-roll test/get/set)
+
+For a config task whose whole job is "make these registry values equal X," ImmyBot ships
+`$method`-aware helpers that collapse the entire test/get/set dance into a few **declarative** lines —
+no `switch ($method)`, no manual `reg load`/hive-loop, no per-profile bookkeeping. You just state the
+desired end state; the helper reads the implicit `$method` and behaves correctly (`test` → returns a
+bool, `set` → applies, `get` → reports), and ImmyBot aggregates the booleans from *multiple* helper
+lines into the task's overall test result (all must pass). This is how real shipped combined scripts
+do it (e.g. "Configure Windows Explorer Options Combined Script") — reach for it before writing a
+`switch ($method)` block by hand.
+
+**These are Metascript helpers → the script's `scriptExecutionContext` must be `Metascript` (2), NOT
+`System`.** They reach onto the endpoint themselves; don't wrap them in `Invoke-ImmyCommand`.
+
+The family (discover more via `GET /api/v1/scripts/functions` filtered to `*Should-Be*`/`*Registry*`):
+- **`Get-WindowsRegistryValue -Path <hive:\key> -Name <value> [-IncludeDefaultProfile]`** — the getter
+  you pipe into a `*Should-Be`. For an `HKCU:` path it resolves the value across user profiles;
+  `-IncludeDefaultProfile` also covers `C:\Users\Default` so **new users inherit** the setting.
+- **`RegistryShould-Be -Value <obj> [-Type <String|ExpandString|Binary|DWord|MultiString|Qword>]`** —
+  general HKLM (single machine value) or, when the piped path starts with `HKCU:`, it **auto-loops
+  every user profile** (no logged-on user required). `-Value $null` *deletes* the value.
+- **`HKCUShould-Be -Value <obj> [-Type <...>]`** — the explicit all-profiles HKCU variant; feed it
+  `Get-WindowsRegistryValue -IncludeDefaultProfile -Path HKCU:\... -Name ...`.
+- **`Get-WindowsControlRegistryValue -SettingName <name>` + `WindowsControlRegistryValueShould-Be
+  -Value <obj>`** — a higher-level pair for well-known "Windows Control" settings by friendly name
+  (e.g. `WindowsWelcomeExperience`) instead of a raw path.
+
+Real working example (whole script body — keep Location Services disabled *and* suppress the Windows
+"Location has been turned off" app popup by turning off "Notify when apps request location" for every
+profile + the Default profile):
+```powershell
+$ConsentStore = 'SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location'
+
+Get-WindowsRegistryValue -Path "HKLM:\$ConsentStore" -Name 'Value' | RegistryShould-Be -Value 'Deny' -Type String
+Get-WindowsRegistryValue -Path "HKLM:\$ConsentStore\NonPackaged" -Name 'Value' | RegistryShould-Be -Value 'Deny' -Type String
+
+Get-WindowsRegistryValue -IncludeDefaultProfile -Path "HKCU:\$ConsentStore" -Name 'Value' | HKCUShould-Be -Value 'Deny' -Type String
+Get-WindowsRegistryValue -IncludeDefaultProfile -Path "HKCU:\$ConsentStore\NonPackaged" -Name 'Value' | HKCUShould-Be -Value 'Deny' -Type String
+Get-WindowsRegistryValue -IncludeDefaultProfile -Path "HKCU:\$ConsentStore" -Name 'ShowGlobalPrompts' | HKCUShould-Be -Value 0 -Type DWord
+```
+Run it with `variables.method = "test"` and each `*Should-Be` streams a per-profile pass/fail line
+(including `C:\Users\Default`) plus a final aggregated `True`/`False` — confirming `HKCUShould-Be` fans
+out across all profiles + Default automatically. (That `ShowGlobalPrompts=0` line is what actually
+suppresses the Windows/Adobe AcroCEF location nag while leaving location itself disabled.)
+
 ## Function scripts (category 7) — shared helper library
 
 `Function`-category scripts are loaded automatically into the Metascript runspace and callable by name

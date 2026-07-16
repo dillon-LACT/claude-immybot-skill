@@ -1,7 +1,7 @@
 ---
 name: immybot
 description: This skill should be used when working with ImmyBot — an RMM/MSP automation platform. Covers calling the ImmyBot REST API (OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions), and writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks with test-get-set, Invoke-ImmyCommand and other built-in Immy cmdlets). Trigger on "ImmyBot", "immy.bot", "push a script to Immy", "detection script", "dynamic versions script", "config task", "maintenance task", "Invoke-ImmyCommand", or RMM software-deployment automation.
-version: 1.3.0
+version: 1.4.0
 ---
 
 # ImmyBot
@@ -42,9 +42,18 @@ $sw.components.schemas.<SomeEnum>                          # enum meanings, in p
 
 ## Core concepts
 
-- **Global vs Local catalog** (`DatabaseType`): Global = cross-tenant catalog shared by every tenant
-  you manage; Local = this tenant only. Most entities (scripts, software, maintenance tasks, media)
-  live in both `.../global` and `.../local` route trees with parallel shapes.
+- **Global vs Local catalog** (`DatabaseType`) — this is NOT "shared across your tenants vs one
+  tenant." **Global = ImmyBot's shared/community catalog that syncs across *every ImmyBot instance*;
+  writing there effectively publishes your script to the public ImmyBot codebase. Local = *your own
+  instance's* catalog (your MSP), private to your company.** Most entities (scripts, software,
+  maintenance tasks, media) exist in both `.../global` and `.../local` route trees with parallel shapes.
+  **Default to Local for anything you write** — normal MSP work (a registry fix, a config task, a
+  detection script, a client remediation) is Local, and that's correct; Local is not "wrong" or
+  "siloed." **Don't create in / migrate to Global unless the explicit intent is to publicly contribute
+  the script to the shared ImmyBot community catalog.** "Private vs reusable across *your own* tenants"
+  is a *separate* axis — tenant **visibility within** your Local catalog (`visibleToAllTenants`), not
+  Local vs Global. The create response doesn't echo `visibleToAllTenants` back, so verify via
+  `GET /api/v1/scripts/local/{id}/authorization`. When in doubt, Local.
 - **Scripts** are the atomic unit. A `Script` has: `name`, `action` (the PowerShell/CMD body — **field
   is `action`, not `scriptContent`**), `scriptLanguage`, `scriptExecutionContext`, `scriptCategory`,
   `timeout`, `outputType`.
@@ -54,7 +63,11 @@ $sw.components.schemas.<SomeEnum>                          # enum meanings, in p
 - **Maintenance Tasks** (shown as "Config Tasks" in the UI when `isConfigurationTask` is true) wire up
   to three scripts — test / get / set — often all three pointing at *the same script*, which branches
   internally on an implicit `$method` variable (`"test"`, `"get"`, `"set"`). See the real Hibernation
-  task example in `references/scripting-guide.md`.
+  task example in `references/scripting-guide.md`. **For registry-only config tasks, don't hand-roll
+  that `switch ($method)` — use the built-in `$method`-aware `RegistryShould-Be` / `HKCUShould-Be`
+  helpers (Metascript context)**, which collapse test/get/set into a few declarative lines and
+  auto-fan-out HKCU across all user profiles + the Default profile. See `references/scripting-guide.md`
+  ("PREFER the built-in `*Should-Be` helpers" section).
 - **Invoke-ImmyCommand** is the bridge: Metascript-context code (runs on the ImmyBot backend, has
   access to `Get-ImmyComputer`, tenant data, etc.) hands a scriptblock to `Invoke-ImmyCommand` to
   actually execute *on the target endpoint*. Use `$using:` to pass variables across that boundary,

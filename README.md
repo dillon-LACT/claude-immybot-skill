@@ -39,6 +39,10 @@ Then dot-source `scripts/Connect-ImmyBot.template.ps1` (copy it into your own pr
 - `references/scripting-guide.md` — PowerShell content guide: script categories/execution contexts, the full `Invoke-ImmyCommand` signature, all built-in `*-Immy*` cmdlets, and real worked examples
 - `scripts/Connect-ImmyBot.template.ps1` — copy-paste auth template, reads from env vars
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for notable changes across versions.
+
 ## Contributing
 
 Corrections and additions are welcome, especially anything reproducible against a live tenant's Swagger spec. Open a PR or issue.
