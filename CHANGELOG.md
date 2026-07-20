@@ -3,6 +3,14 @@
 All notable changes to this skill are documented here. Everything was verified against live ImmyBot
 Swagger specs and APIs, not guessed from general docs.
 
+## [1.4.3] - 2026-07-20
+
+### Added
+- Timed ad-hoc via `POST /api/v1/run-immy-service-new` + `updateTime` (`HH:mm`) documented in the
+  software playbook.
+- **Gotcha:** `suppressRebootsDuringBusinessHours` is independent of Force reboot — must be `false`
+  for after-hours Force installs or reboots can still defer.
+
 ## [1.4.2] - 2026-07-20
 
 ### Changed

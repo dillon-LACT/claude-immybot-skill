@@ -1,7 +1,7 @@
 ---
 name: immybot
 description: This skill should be used when working with ImmyBot — an RMM/MSP automation platform. Covers calling the ImmyBot REST API (OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions), the end-to-end software install/deploy playbook (identify via primary user, catalog check, upload/analyze, ad-hoc + ongoing deployments), and writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks with test-get-set, Invoke-ImmyCommand and other built-in Immy cmdlets). Trigger on "ImmyBot", "immy.bot", "push a script to Immy", "install software", "deploy software", "detection script", "dynamic versions script", "config task", "maintenance task", "Invoke-ImmyCommand", or RMM software-deployment automation.
-version: 1.4.2
+version: 1.4.3
 ---
 
 # ImmyBot
@@ -32,22 +32,36 @@ one-off process. Applies to **every** title (CAD apps, browsers, vendor tools, e
    solid Microsoft 365 directory shop (e.g. Google Workspace / manual user sync), Immy people can
    go stale when someone switches computers and nobody updates primary user. In those cases, target
    the **hostname** (computer) after confirmation — safer than a stale person link.
-6. **Check Global and Local catalogs** for existing software. Reuse a good definition. **Writes stay
-   Local** unless the operator explicitly wants Global community publish.
+6. **Check Global and Local catalogs** for existing software. Prefer an existing **Global** title when
+   it is already battle-tested by the ImmyBot community. **Custom / MSP-authored writes stay Local**
+   unless the operator explicitly wants Global community publish.
 7. **If software is missing — always ask before fetching an installer:** *“Should I go look for the
    installer, or do you have a link I should use?”* Only hunt after they say so; if they give a
    link/path, upload from that. Then Local upload → analyze / fast-create so Immy can generate
    detection/install scripts.
 8. **If generated scripts look generic or wrong — fix them** (silent args, detection, complex
    vendor installers often need this). Smoke-test one machine when practical.
-9. **Ad-hoc now + ongoing deployment.** Run ad-hoc for the immediate need. Also ensure an **ongoing**
-   deployment targets machine / user / tenant / group / tag as appropriate so **updates** flow when
-   present and **new matching machines** get the software on the next applicable maintenance.
-10. **Ad-hoc offline behavior — always ask:** Immy will ask what to do if the computer is off.
-    Confirm and bake in **finish on connect** or **skip if offline**. Do not require the machine to
-    be online before creating the ad-hoc.
-11. **Reboot policy** — set what the job needs (e.g. **Force** = restart before and after). Ask if
-    the ticket does not specify.
+9. **Timed ad-hoc via `POST /api/v1/run-immy-service-new`** (not weekly `/schedules`, and not
+   `scripts/run`). This enqueues maintenance sessions; returns **202** with an empty body when
+   `sessionGroupId` is set. Populate exactly one of `computers` / `persons` / `tenants`.
+   - **`updateTime`**: `"HH:mm"` 24-hour string. **Null / omit = start immediately.** With a time set,
+     the session is queued for that clock time in `timeZoneInfoId` (e.g. `America/Los_Angeles`). If
+     that time already passed today, it rolls to the **next day**. Requires SchedulesFeature.
+   - **`rebootPreference`**: `Force` = `-1`, `Normal` = `0`, `Suppress` = `1`, `Prompt` = `2`.
+   - **`offlineBehavior`**: `Skip` = `1`, `ApplyOnConnect` = `2`. Always confirm with the operator.
+   - **`desiredSoftwareState`**: usually `LatestVersion` = `5` for “install/update to newest.”
+   - **Do not call `run-now`** if the intent is “configure for tonight / later.”
+10. **`suppressRebootsDuringBusinessHours` — easy to get wrong, high impact.** The UI/default often
+    leaves this `true`. That flag is **independent of `rebootPreference`**: even with **Force**,
+    Immy can still defer reboots that fall inside the computer’s configured business hours. For
+    after-hours Force installs (reboot before/after required), set
+    **`suppressRebootsDuringBusinessHours: false`**. Leaving it `true` is a silent foot-gun — the
+    session looks correctly Force-flagged but reboots may not happen when you expect. Always check
+    this field before enqueueing. Put it in the skill checklist every time.
+11. **Ongoing deployment** after the immediate need — target machine / user / tenant / group / tag
+    so updates and new matching machines stay covered on later maintenance.
+12. **Ask before blasting the fleet** — enqueue one target first, confirm the queued session in the
+    UI looks right (time, Force, offline behavior, business-hours suppress), then clone the rest.
 
 Keep primary users and person↔computer links current; the playbook depends on them.
 
@@ -131,6 +145,12 @@ the script-push pattern, ad-hoc script execution, and maintenance-session rerun/
 
 ## Gotchas (bite people every time)
 
+- **`suppressRebootsDuringBusinessHours` vs Force reboot.** Setting `rebootPreference` to Force does
+  **not** override this flag. If suppress-during-business-hours is `true`, after-hours Force jobs can
+  still defer reboots. For intentional Force before/after installs, set it `false` and verify on the
+  queued session. (Caught live on a timed `run-immy-service-new` ad-hoc — UI defaults often leave it on.)
+- Timed ad-hoc installs use `POST /api/v1/run-immy-service-new` with `updateTime` (`HH:mm`), not
+  weekly `/schedules`, and not immediate `scripts/run`. Null `updateTime` = run now.
 - Script body field is `action`, not `scriptContent`.
 - List-style GET endpoints (e.g. `maintenance-sessions?computerId=X`) return the HTML SPA instead of
   JSON — only per-ID GETs (`/maintenance-sessions/{id}`) work through the API.
