@@ -1,7 +1,19 @@
 # Changelog
 
-All notable changes to this skill are documented here. Everything was verified live against a real
-ImmyBot tenant's Swagger spec and API, not guessed from general docs.
+All notable changes to this skill are documented here. Everything was verified against live ImmyBot
+Swagger specs and APIs, not guessed from general docs.
+
+## [1.4.2] - 2026-07-20
+
+### Changed
+- Generalized wording: removed customer names, hostnames, and instance-specific operational anecdotes
+  from `SKILL.md` and references.
+
+## [1.4.1] - 2026-07-20
+
+### Added
+- End-to-end **software install / deploy playbook** (primary-user targeting, catalog check,
+  installer ask-first, ad-hoc + ongoing, offline/reboot prompts).
 
 ## [1.4.0] - 2026-07-16
 

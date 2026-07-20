@@ -79,12 +79,10 @@ Same GET-mutate-POST pattern works for `/api/v1/scripts/global/{id}` if you have
 access. There's also `POST /api/v1/scripts/duplicate` and a local→global migration pair:
 `/api/v1/scripts/local/{id}/migrate-local-to-global` (+ `-what-if` dry-run variant).
 
-**If this hangs with no error, check your PowerShell binary before anything else.** Confirmed live:
-the exact GET-mutate-POST sequence above hung for 60s+ inside `ConvertTo-Json -Depth 20` — before
-the POST even fired — when run via legacy `powershell.exe` (5.1), on a plain ~6KB object with no
-nested structure to justify it. Switching to `pwsh` (PowerShell 7+) fixed it instantly, no other
-changes. Don't waste time adding `-TimeoutSec`/try-catch/progress-bar workarounds first — confirm
-which binary is actually running the script.
+**If this hangs with no error, check your PowerShell binary before anything else.** Legacy
+`powershell.exe` (5.1) can hang inside `ConvertTo-Json -Depth 20` before the POST even fires, even
+on small flat objects. Switching to `pwsh` (PowerShell 7+) fixes it. Don't waste time on
+`-TimeoutSec`/try-catch/progress-bar workarounds first — confirm which binary is running.
 
 ## Software (global catalog)
 
@@ -116,8 +114,8 @@ Returns `testScriptId`/`getScriptId`/`setScriptId` (+ `testEnabled`/`getEnabled`
 ### "Runs Against" (task creation UI) → fields — get this right, it's unforgiving
 
 The new-task form's **Runs Against** radio group is the same decision as these fields, and picking
-wrong causes real breakage (see the SKILL.md gotcha; real miss = Deltek shipped as a config task
-when it should have run against computers):
+wrong causes real breakage (see the SKILL.md gotcha; common miss = a normal task shipped as a
+config task when it should have run against computers):
 
 | UI "Runs Against"            | Fields set                                             | Use when |
 | ---------------------------- | ------------------------------------------------------ | -------- |
@@ -169,21 +167,21 @@ $s = Invoke-RestMethod -Uri "$immyBase/api/v1/maintenance-sessions/<sessionId>" 
 List-style maintenance-session GETs (e.g. `?computerId=X`) return the HTML SPA, not JSON — only
 per-ID GETs work through the API.
 
-### DevExtreme `/dx` grids — how to query them at scale (verified live 2026-07-14)
+### DevExtreme `/dx` grids — how to query them at scale
 
 The `*/dx` endpoints are DevExtreme DataSource endpoints. They take JSON query params
 (URL-encode each): `filter`, `sort`, `select`, `group`, `groupSummary`, `totalSummary`,
 `skip`, `take`, `requireTotalCount`, `requireGroupCount`. Hard-won rules from probing
-`/api/v1/maintenance-actions/dx` on a tenant with ~74k actions/day:
+`/api/v1/maintenance-actions/dx` on busy tenants:
 
 - **`requireTotalCount=true` is the expensive/timeout part, NOT the date filter.** It
-  forces a full `COUNT(*)` over the filtered set. Live: an hour window counted in 0.4s,
-  a day (74,625 rows) took 38s, a week timed out (>70s). The row fetch itself is fast.
+  forces a full `COUNT(*)` over the filtered set. Narrow windows (hour) are cheap; day+
+  windows can take tens of seconds or time out. The row fetch itself is usually fast.
   **Never send `requireTotalCount=true` on a wide window** — page with
   `requireTotalCount=false` and stop on a short page.
 - **Wide + sorted raw fetches also choke.** A week-wide `sort` + `take=1000` (no count)
-  still timed out — sorting ~500k rows to return the first page is too much. Keep raw
-  windows narrow (hour/day), or aggregate server-side (below).
+  can still time out — sorting hundreds of thousands of rows to return the first page is
+  too much. Keep raw windows narrow (hour/day), or aggregate server-side (below).
 - **Filter/group on the INTEGER enum fields, not the string `*Name` variants.**
   `group=`/`filter=` on `actionTypeName`, `resultName`, or `maintenanceTypeName` return
   **HTTP 500**. The underlying ints (`actionType`, `result`, `maintenanceType`) group and
@@ -199,23 +197,22 @@ The `*/dx` endpoints are DevExtreme DataSource endpoints. They take JSON query p
   **NOT count-distinct** — get distinct computers by grouping on `computerId` (or nesting
   it) and reading `groupCount`/subgroup counts, not via a summary.
 
-`maintenanceActions` enum ints (declaration order, confirmed against live volumes):
+`maintenanceActions` enum ints (declaration order, verified against live data):
 - `actionType`: 0=NoAction, 1=Install, 2=Update, 3=Uninstall, 4=Download, 5=Reinstall,
   6=Downgrade, 7=Undetermined, 8=TaskEnforce, 9=TaskMonitor, 10=TaskAudit
 - `result`: 0=Pending, 1=Success, 2=Failed, 3=Cancelled, 4=Indeterminable, 5=Resolved
 
 ### Reporting on maintenance actions by week
 
-**Preferred: action-first, day-windowed, with NoAction filtered server-side.** On a real
-tenant ~95% of action rows are `actionType=0` (NoAction — pass-only checks). Excluding
-them server-side collapses a day from ~74.6k to ~3.5k rows and a week from ~500k to ~29k,
-so a whole day fits in ONE call. This is ~7 calls for a full week, vs one call per session
-(14k+) for the session-first pattern below.
+**Preferred: action-first, day-windowed, with NoAction filtered server-side.** Most action rows
+are often `actionType=0` (NoAction — pass-only checks). Excluding them server-side usually
+collapses volume enough that a whole day fits in one call (~7 calls for a full week), vs one
+call per session for the session-first pattern below.
 
 ```powershell
 # one call per day; loop the 7 days of the week. createdDateUTC is UTC.
 $dayFilter = [uri]::EscapeDataString(
-  '[["createdDateUTC",">=","07/07/2026 00:00:00"],"and",["createdDateUTC","<","07/08/2026 00:00:00"],"and",["actionType","<>",0]]'
+  '[["createdDateUTC",">=","01/01/2026 00:00:00"],"and",["createdDateUTC","<","01/02/2026 00:00:00"],"and",["actionType","<>",0]]'
 )
 $sort = [uri]::EscapeDataString('[{"selector":"createdDateUTC","desc":true}]')
 $sel  = [uri]::EscapeDataString('["id","parentId","tenantId","tenantName","computerId","actionTypeName","resultName","maintenanceTypeName","maintenanceIdentifier","maintenanceDisplayName","maintenanceSessionId","reason","createdDateUTC"]')
@@ -342,14 +339,12 @@ values the API itself already accepted and stored for that exact object, so ther
 picking the wrong enum int or string name — you're not deriving anything, just replaying what's
 already known-valid. Only override `timeout`/`parameterOverrides`/`variables`.
 
-**Hard ~120s gateway timeout on this endpoint — confirmed live, not a fluke.** `/api/v1/scripts/run`
-is a synchronous streaming call: the HTTP response doesn't come back until the script finishes, and
-this tenant's infrastructure kills that stream at almost exactly 2 minutes with a `504 Gateway
-Timeout` / `stream timeout`, regardless of client-side `-TimeoutSec`. This is **not** related to a
-caller's own VPN or network — confirmed by disconnecting/reconnecting VPN mid-debugging and seeing
-the identical failure. For a script that genuinely needs longer than ~120s (e.g. one that itself
-submits a job to another system and polls for that job's result), don't fight this — restructure the
-call:
+**Hard ~120s gateway timeout on this endpoint.** `/api/v1/scripts/run` is a synchronous streaming
+call: the HTTP response doesn't come back until the script finishes, and the gateway commonly kills
+that stream at almost exactly 2 minutes with a `504 Gateway Timeout` / `stream timeout`, regardless
+of client-side `-TimeoutSec`. For a script that genuinely needs longer than ~120s (e.g. one that
+itself submits a job to another system and polls for that job's result), don't fight this —
+restructure the call:
 1. Have the script take a "submit and return immediately" mode (a parameter like
    `-WaitForResults $false`) instead of blocking on its own internal poll loop.
 2. Fire it via `/scripts/run` with that override — returns in seconds since the script itself
@@ -396,7 +391,7 @@ especially against a live client machine you don't want to risk.
 query params instead: `name` (string, exact-ish match), `tenantId`, `orderByUpdatedDate`,
 `pageSize` (default 25).
 ```powershell
-Invoke-RestMethod -Uri "$immyBase/api/v1/computers?name=PCH-LT08&pageSize=5" -Headers $headers
+Invoke-RestMethod -Uri "$immyBase/api/v1/computers?name=EXAMPLE-LT01&pageSize=5" -Headers $headers
 # -> { id, name, tenant, tenantId, online, updatedDate, excludeFromMaintenance }
 ```
 Don't assume every list endpoint shares the same query-param convention — check
@@ -419,9 +414,8 @@ assignment** in the API, id shown in the UI URL. There is no plain `GET /api/v1/
 - **`taskParameterValues` returns every field in cleartext, including `Password`-type params and API
   keys** — same shape as any other value, no masking. Before printing/logging a target-assignment
   response, filter out fields you know are sensitive (by name — `Password`, `*ApiKey`, `*Secret`,
-  `*Token`, etc.) rather than dumping the whole object, exactly like the Railway `variables` query
-  gotcha in `SKILL.md`. Confirmed live: an unfiltered `GET /api/v1/target-assignments/{id}` dump put
-  a real Anthropic API key and a real account password straight into a chat transcript.
+  `*Token`, etc.) rather than dumping the whole object. Unfiltered dumps have been observed to leak
+  real secrets into chat transcripts.
 - To change values: `POST /api/v1/target-assignments/{deploymentId}/change-request`
   (`CreateTargetAssignmentChangeRequestRequest`, needs `deployments:manage_change_requests`
   permission). **This is not a partial patch** — the `payload` is a full

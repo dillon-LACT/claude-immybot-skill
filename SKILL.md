@@ -1,13 +1,13 @@
 ---
 name: immybot
 description: This skill should be used when working with ImmyBot — an RMM/MSP automation platform. Covers calling the ImmyBot REST API (OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions), the end-to-end software install/deploy playbook (identify via primary user, catalog check, upload/analyze, ad-hoc + ongoing deployments), and writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks with test-get-set, Invoke-ImmyCommand and other built-in Immy cmdlets). Trigger on "ImmyBot", "immy.bot", "push a script to Immy", "install software", "deploy software", "detection script", "dynamic versions script", "config task", "maintenance task", "Invoke-ImmyCommand", or RMM software-deployment automation.
-version: 1.4.1
+version: 1.4.2
 ---
 
 # ImmyBot
 
 ImmyBot is an RMM automation platform (MSP-focused). Tenants run at `https://<subdomain>.immy.bot`.
-Everything below was verified live against a real tenant's Swagger spec and API — not guessed from
+Everything below was verified against live ImmyBot Swagger specs and APIs — not guessed from
 general docs. See `references/` for the deep dives; this file is the map.
 
 ## Software install / deploy playbook (ALL software)
@@ -73,8 +73,8 @@ $headers = @{ Authorization = "Bearer $tok"; "Content-Type" = "application/json"
 Full copy-paste script: `scripts/Connect-ImmyBot.template.ps1` (reads from env vars — fill in your
 own tenant's values, or point at a project that already has a filled-in copy).
 
-**Discover the live API yourself** — every tenant's Swagger spec is authoritative and current, and this
-tenant's spec was unusually well-documented (enum fields carry human-readable `x-enum-descriptions`):
+**Discover the live API yourself** — every tenant's Swagger spec is authoritative and current
+(enum fields often carry human-readable `x-enum-descriptions`):
 ```powershell
 $sw = Invoke-RestMethod -Uri "$immyBase/swagger/v1/swagger.json" -Headers $headers
 $sw.paths.PSObject.Properties.Name | Sort-Object          # every route
@@ -103,12 +103,12 @@ $sw.components.schemas.<SomeEnum>                          # enum meanings, in p
   script + download-installer script instead of static versions.
 - **Maintenance Tasks** (shown as "Config Tasks" in the UI when `isConfigurationTask` is true) wire up
   to three scripts — test / get / set — often all three pointing at *the same script*, which branches
-  internally on an implicit `$method` variable (`"test"`, `"get"`, `"set"`). See the real Hibernation
-  task example in `references/scripting-guide.md`. **For registry-only config tasks, don't hand-roll
-  that `switch ($method)` — use the built-in `$method`-aware `RegistryShould-Be` / `HKCUShould-Be`
-  helpers (Metascript context)**, which collapse test/get/set into a few declarative lines and
-  auto-fan-out HKCU across all user profiles + the Default profile. See `references/scripting-guide.md`
-  ("PREFER the built-in `*Should-Be` helpers" section).
+  internally on an implicit `$method` variable (`"test"`, `"get"`, `"set"`). See the built-in
+  hibernation-style example in `references/scripting-guide.md`. **For registry-only config tasks,
+  don't hand-roll that `switch ($method)` — use the built-in `$method`-aware `RegistryShould-Be` /
+  `HKCUShould-Be` helpers (Metascript context)**, which collapse test/get/set into a few declarative
+  lines and auto-fan-out HKCU across all user profiles + the Default profile. See
+  `references/scripting-guide.md` ("PREFER the built-in `*Should-Be` helpers" section).
 - **Invoke-ImmyCommand** is the bridge: Metascript-context code (runs on the ImmyBot backend, has
   access to `Get-ImmyComputer`, tenant data, etc.) hands a scriptblock to `Invoke-ImmyCommand` to
   actually execute *on the target endpoint*. Use `$using:` to pass variables across that boundary,
@@ -124,8 +124,7 @@ $sw.components.schemas.<SomeEnum>                          # enum meanings, in p
 
 Read `references/scripting-guide.md` before writing any ImmyBot script — it has the full
 `ScriptCategory`/`ScriptExecutionContext` semantics, the verified `Invoke-ImmyCommand` signature, all
-43 built-in `*-Immy*` cmdlets, and three real working examples (detection, dynamic-versions, config
-task) pulled live from a production tenant.
+43 built-in `*-Immy*` cmdlets, and worked examples (detection, dynamic-versions, config task).
 
 Read `references/api-reference.md` before calling the REST API — it has pagination/filter query params,
 the script-push pattern, ad-hoc script execution, and maintenance-session rerun/status endpoints.
@@ -139,7 +138,7 @@ the script-push pattern, ad-hoc script execution, and maintenance-session rerun/
   and those integers do **not** reliably match the declaration order shown in the Swagger enum
   description. Don't compute an enum's integer from its position in the doc — fetch a real existing
   script/task of the category you want and copy its integer, or use the `Filters=field==N` query to
-  probe (see `references/scripting-guide.md` for the mapping already confirmed on this tenant).
+  probe (see `references/scripting-guide.md` for confirmed mappings).
 - PS5.1 `Expand-Archive` requires a `.zip` extension — copy `.whl`/other archive files to a temp `.zip`
   first.
 - `Set-Content -Encoding UTF8` on PS5.1 adds a BOM. If a downstream file parser (Python `.env`, a
@@ -164,27 +163,25 @@ the script-push pattern, ad-hoc script execution, and maintenance-session rerun/
   its associated Software is detected/installed on the machine (per ImmyBot's own docs). So a task
   you meant to run everywhere, marked as a config task, will silently never run as a normal
   deployment. Rule of thumb: **unless the task exists to inject runtime parameters for an installer,
-  pick Computers.** Real miss (Deltek, 2026-07): it was created as *Software (Configuration Task)*
-  when it should have been *Runs Against: Computers*, so it didn't deploy/run as intended. When in
-  doubt, choose Computers.
+  pick Computers.** Common miss: creating a normal task as *Software (Configuration Task)* when it
+  should have been *Runs Against: Computers*, so it never deploys on its own. When in doubt, choose
+  Computers.
 - `GET /api/v1/computers` uses plain `name`/`tenantId` query params, not the `Filters=` Sieve
   syntax that `/scripts` and `/software` use — check each route's own params in Swagger.
-- `POST /api/v1/scripts/run` lets you test a script/task against a real computer with parameter
-  and variable overrides (e.g. simulate `$method`) without deploying anything — see
-  `references/api-reference.md`. For anything you haven't proven yet, especially against a live
-  client machine, write a strictly read-only preview variant rather than trusting `-WhatIf`.
+- `POST /api/v1/scripts/run` lets you test a script/task against a computer with parameter and
+  variable overrides (e.g. simulate `$method`) without deploying anything — see
+  `references/api-reference.md`. For anything unproven, prefer a strictly read-only preview variant
+  rather than trusting `-WhatIf`.
 - Detection/version scripts commonly run `scriptExecutionContext = Metascript` and reach onto the
   endpoint via `Invoke-ImmyCommand { ... } -Verbose`, returning a version string (or `$null` if not
-  installed) — not a boolean. See `Detect-GoogleChrome` (`Detect-Software "Chrome"`, a built-in helper)
-  and the 1Password example in `references/scripting-guide.md` for both styles.
-- **`POST /api/v1/scripts/run` has a hard ~120s gateway timeout** (confirmed live, `504 Gateway
-  Timeout` / `stream timeout`, not caller VPN/network related) — it's a synchronous streaming call
-  that blocks until the script finishes. For anything that legitimately runs longer, make the
-  script itself return fast (a "submit and don't wait" mode) and poll the real downstream result
-  separately, rather than fighting this endpoint's timeout. Full pattern in `references/api-reference.md`.
-- **Run API calls from `pwsh` (PowerShell 7+), not legacy `powershell.exe` (5.1).** Confirmed live:
-  `$scriptObject | ConvertTo-Json -Depth 20` hung indefinitely (60s+, no error, no timeout) in
-  Windows PowerShell 5.1 on a trivial ~6KB flat object with zero nested structure — this wasn't a
-  slow API, it never even reached the HTTP call. The identical script ran instantly in `pwsh`. If a
-  GET-mutate-POST script "hangs" with no error, suspect this before suspecting the network — check
-  which `powershell`/`pwsh` binary is actually running it before debugging anything else.
+  installed) — not a boolean. See the Chrome / store-app detection examples in
+  `references/scripting-guide.md`.
+- **`POST /api/v1/scripts/run` has a hard ~120s gateway timeout** (observed as `504 Gateway Timeout` /
+  `stream timeout`) — it's a synchronous streaming call that blocks until the script finishes. For
+  anything that legitimately runs longer, make the script itself return fast (a "submit and don't
+  wait" mode) and poll the real downstream result separately. Full pattern in
+  `references/api-reference.md`.
+- **Run API calls from `pwsh` (PowerShell 7+), not legacy `powershell.exe` (5.1).** Windows PowerShell
+  5.1 can hang indefinitely on `ConvertTo-Json -Depth 20` for otherwise trivial objects — the request
+  never leaves the machine. The same payload runs immediately in `pwsh`. If a GET-mutate-POST script
+  "hangs" with no error, check which binary is running before debugging the network.

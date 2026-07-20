@@ -1,8 +1,8 @@
 # ImmyBot Scripting Guide
 
-Everything here was pulled live from a production tenant: real enum descriptions out of Swagger, real
-`Get-Help -Full` output for the built-in cmdlets (via the ad-hoc-metascript introspection trick — see
-`api-reference.md`), and real script bodies fetched from the global catalog. Not paraphrased docs.
+Everything here was verified against live ImmyBot Swagger, real `Get-Help -Full` output for the
+built-in cmdlets (via the ad-hoc-metascript introspection trick — see `api-reference.md`), and
+script bodies from the global catalog. Not paraphrased docs.
 
 ## Script fields
 
@@ -43,8 +43,8 @@ order* in Swagger does NOT match these integers, so don't derive them yourself):
 | 6 | `DeviceInventory` | Inventory-collection script |
 | 7 | `Function` | Helper function loaded into the Metascript runspace for other scripts to call |
 | 8 | `ImmySystem` | Built-in system script, read-only, protected from deletion |
-| 9 | `DynamicVersions` | Dynamically discovers software versions from an external source (confirmed via Trimble Connect script) |
-| 10 | `DownloadInstaller` | Downloads an installer payload for a dynamic version (confirmed via a SentinelOne integration script) |
+| 9 | `DynamicVersions` | Dynamically discovers software versions from an external source (confirmed via global-catalog examples) |
+| 10 | `DownloadInstaller` | Downloads an installer payload for a dynamic version (confirmed via global-catalog examples) |
 | 11 | `Module` | PowerShell module imported into the Metascript runspace |
 | 12 | `Preflight` | Gate script that runs before a maintenance session (confirmed via "Is Machine Fully Booted") |
 
