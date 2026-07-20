@@ -3,6 +3,7 @@
 A [Claude Code](https://claude.com/claude-code) skill for working with [ImmyBot](https://immy.bot), an RMM/MSP automation platform. It covers:
 
 - Calling the ImmyBot REST API (Azure AD OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions)
+- An end-to-end **software install / deploy playbook** (identify via primary user, catalog check, upload/analyze, ad-hoc + ongoing deployments, offline and reboot prompts)
 - Writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks, `Invoke-ImmyCommand` and other built-in Immy cmdlets)
 
 Everything in this skill was verified live against a real ImmyBot tenant's Swagger spec and API, not guessed from general docs.

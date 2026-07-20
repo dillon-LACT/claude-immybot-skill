@@ -1,7 +1,7 @@
 ---
 name: immybot
-description: This skill should be used when working with ImmyBot — an RMM/MSP automation platform. Covers calling the ImmyBot REST API (OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions), and writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks with test-get-set, Invoke-ImmyCommand and other built-in Immy cmdlets). Trigger on "ImmyBot", "immy.bot", "push a script to Immy", "detection script", "dynamic versions script", "config task", "maintenance task", "Invoke-ImmyCommand", or RMM software-deployment automation.
-version: 1.4.0
+description: This skill should be used when working with ImmyBot — an RMM/MSP automation platform. Covers calling the ImmyBot REST API (OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions), the end-to-end software install/deploy playbook (identify via primary user, catalog check, upload/analyze, ad-hoc + ongoing deployments), and writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks with test-get-set, Invoke-ImmyCommand and other built-in Immy cmdlets). Trigger on "ImmyBot", "immy.bot", "push a script to Immy", "install software", "deploy software", "detection script", "dynamic versions script", "config task", "maintenance task", "Invoke-ImmyCommand", or RMM software-deployment automation.
+version: 1.4.1
 ---
 
 # ImmyBot
@@ -9,6 +9,47 @@ version: 1.4.0
 ImmyBot is an RMM automation platform (MSP-focused). Tenants run at `https://<subdomain>.immy.bot`.
 Everything below was verified live against a real tenant's Swagger spec and API — not guessed from
 general docs. See `references/` for the deep dives; this file is the map.
+
+## Software install / deploy playbook (ALL software)
+
+When asked to install software for named users or machines, follow this path — do not invent a
+one-off process. Applies to **every** title (CAD apps, browsers, vendor tools, etc.).
+
+1. **Identify devices via primary user first.** Search the tenant's computers and match on Immy
+   **primary user** (name/email). **Keep primary users up to date** — agents and operators should
+   treat that hygiene as part of the workflow, because it is how “whose machine is this?” gets
+   solved without guessing hostnames.
+2. **Multiple computers for one user.** Compare **last time each machine talked to Immy** (last
+   agent contact / inventory). Prefer the most recently seen box for ad-hoc. If a second machine
+   has not checked in for **more than a few weeks**, ignore it for the ad-hoc session (ongoing
+   deployments can still be broader when intentional).
+3. **Confirm the machine is genuinely theirs before targeting.** Check Immy inventory for **last
+   signed-in user** (or run a short read-only check on the endpoint via terminal / `scripts/run`).
+   If it looks right, **ask the operator to confirm** the target before creating the deploy.
+4. **Prefer person-targeted ad-hoc when it fits** — ad-hoc can target the **user**, not only the
+   hostname. Still verify the active machine looks like that user’s daily driver first.
+5. **Prefer hostname targeting when person records are stale risk.** If the tenant is **not** a
+   solid Microsoft 365 directory shop (e.g. Google Workspace / manual user sync), Immy people can
+   go stale when someone switches computers and nobody updates primary user. In those cases, target
+   the **hostname** (computer) after confirmation — safer than a stale person link.
+6. **Check Global and Local catalogs** for existing software. Reuse a good definition. **Writes stay
+   Local** unless the operator explicitly wants Global community publish.
+7. **If software is missing — always ask before fetching an installer:** *“Should I go look for the
+   installer, or do you have a link I should use?”* Only hunt after they say so; if they give a
+   link/path, upload from that. Then Local upload → analyze / fast-create so Immy can generate
+   detection/install scripts.
+8. **If generated scripts look generic or wrong — fix them** (silent args, detection, complex
+   vendor installers often need this). Smoke-test one machine when practical.
+9. **Ad-hoc now + ongoing deployment.** Run ad-hoc for the immediate need. Also ensure an **ongoing**
+   deployment targets machine / user / tenant / group / tag as appropriate so **updates** flow when
+   present and **new matching machines** get the software on the next applicable maintenance.
+10. **Ad-hoc offline behavior — always ask:** Immy will ask what to do if the computer is off.
+    Confirm and bake in **finish on connect** or **skip if offline**. Do not require the machine to
+    be online before creating the ad-hoc.
+11. **Reboot policy** — set what the job needs (e.g. **Force** = restart before and after). Ask if
+    the ticket does not specify.
+
+Keep primary users and person↔computer links current; the playbook depends on them.
 
 ## Auth (do this first)
 
