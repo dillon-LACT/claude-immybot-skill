@@ -4,9 +4,9 @@ Evidence labels used below:
 
 | Label | Meaning |
 |---|---|
-| `Verified by live Swagger` | Confirmed against `https://logictcg.immy.bot/swagger/v1/swagger.json` |
+| `Verified by live Swagger` | Confirmed against `https://yourcompany.immy.bot/swagger/v1/swagger.json` |
 | `Verified by read-back/API test` | Called live and inspected the response |
-| `Observed in RNS` | Done for Robin Nanney Studio during the 2026-07-21 session |
+| `Observed` | Done on a pilot customer during a live session |
 | `Unresolved — do not operationalize` | Hypothesis only |
 
 Do **not** copy raw agent install scripts, tokens, or `taskParameterValues` into this file, Slack, or board notes.
@@ -48,15 +48,15 @@ Approval applies only to that manifest. Re-read the saved assignment after creat
 
 ### No sessions on enroll
 
-**Preferred path (LogicTCG, as of 2026-07-21): Datto RMM integration** — `Observed in RNS`:
+**Preferred path: Datto RMM integration** — `Observed` on a pilot customer:
 
-1. Ensure **Datto RMM** provider-link is present and enabled (id **69** on logictcg.immy.bot).
+1. Ensure **Datto RMM** provider-link is present and enabled (look up Datto RMM provider-link id on your instance).
 2. Create/activate the Immy tenant.
 3. Link the Datto site/client to that Immy tenant (`POST .../provider-links/{id}/clients/link-to-tenant`, or Immy UI / Datto integration UI). Confirm the identity tuple: Datto `externalClientId` + Immy `tenantId`.
 4. Let Datto→Immy agent sync bring devices in. Do **not** kick onboarding sessions as part of linking. Verify computers land under the correct `tenantId` with no unintended maintenance sessions.
 5. Manual PowerShell agent install scripts are a **fallback only** (broken/disabled RMM link, non-Datto customer, or operator explicitly asks).
 
-**RNS link (`Observed in RNS`):** Datto RMM client `externalClientId=379915` (`Robin Nanney Studio (RNS)`) → `linkedToTenantId=588`.
+**Pilot link (`Observed`):** confirm Datto `externalClientId` ↔ Immy `linkedToTenantId` for the customer before proceeding.
 
 **Fallback — ImmyBot Agent install script** (`Verified by live Swagger` + `Verified by read-back/API test`):
 
@@ -82,7 +82,7 @@ Approval applies only to that manifest. Re-read the saved assignment after creat
 | `NotPresent` | 1 | Uninstall / ensure absent |
 | `NoAction` | 6 | Detect only / no enforce |
 
-`Verified by read-back/API test`: existing LogicTCG assignments heavily use `desiredSoftwareState` 5 and 7. Tenant-scoped software deployments commonly use **`targetType = AllForTenant` (21)** with `tenantId` set, `onboardingOnly = false`, `targetEnforcement = Required` (1).
+`Verified by read-back/API test`: existing MSP assignments heavily use `desiredSoftwareState` 5 and 7. Tenant-scoped software deployments commonly use **`targetType = AllForTenant` (21)** with `tenantId` set, `onboardingOnly = false`, `targetEnforcement = Required` (1).
 
 ---
 
@@ -97,14 +97,14 @@ Approval applies only to that manifest. Re-read the saved assignment after creat
 
 ### 1 — Create tenant
 
-`Verified by live Swagger` + `Observed in RNS`:
+`Verified by live Swagger` + `Observed`:
 
 `POST /api/v1/tenants` body (`CreateTenantRequestBody`):
 
 ```json
 {
-  "name": "Robin Nanney Studio (RNS)",
-  "slug": "RNS",
+  "name": "<customer>",
+  "slug": "CODE",
   "ownerTenantId": 1,
   "isMsp": false,
   "principalId": null,
@@ -116,21 +116,21 @@ Approval applies only to that manifest. Re-read the saved assignment after creat
 
 Naming convention observed across the instance: `"Display Name (CODE)"` with matching slug.
 
-- `ownerTenantId` for LogicTCG MSP is **1** (`Logic TCG`, `isMsp: true`) — `Verified by read-back/API test`.
+- `ownerTenantId` is the MSP tenant id on your instance (`isMsp: true`) — look it up via `GET /api/v1/tenants` before create — `Verified by read-back/API test`.
 - Duplicate names fail — `Verified by live Swagger` description.
-- After create: `PATCH /api/v1/tenants/activate/{id}` so the tenant can participate in maintenance later — `Verified by live Swagger` + `Observed in RNS` (POST returns 405; PATCH works).
+- After create: `PATCH /api/v1/tenants/activate/{id}` so the tenant can participate in maintenance later — `Verified by live Swagger` + `Observed` (POST returns 405; PATCH works).
 - Creating a tenant does **not** auto-link Azure (`azureTenantLink: null` unless `principalId` provided).
 
-**RNS result (`Observed in RNS`):** tenant id **588**, name `Robin Nanney Studio (RNS)`, slug `RNS`, owner `1`, activated.
+**Pilot result (`Observed`):** confirm created tenant id/name/slug/`ownerTenantId`, then activate.
 
 ### 2 — Link Datto RMM client (preferred) / fallback install script
 
-**Preferred — Datto RMM (`Observed in RNS`):**
+**Preferred — Datto RMM (`Observed`):**
 
 1. `GET /api/v1/provider-links/69/clients` — find the Datto site (`externalClientId`, name).
 2. Link to the Immy tenant if not already linked:
    - `POST /api/v1/provider-links/69/clients/link-to-tenant` with `{ "clientIds": ["<dattoExternalClientId>"], "tenantId": <immyTenantId> }`
-   - Or use Immy/Datto UI (what Dillon used for RNS).
+   - Or use Immy/Datto UI (what was used for the pilot).
 3. Optional: `POST .../clients/link-to-new-tenant` creates a tenant from a Datto client in one step (`externalClientId`, optional `tenantName`) — useful when the Immy tenant does not exist yet.
 4. Confirm read-back: client row shows `linkedToTenantId` = Immy tenant id.
 5. Wait for / trigger agent sync as the operator prefers; verify computers under that tenant **without** onboarding sessions.
@@ -138,13 +138,13 @@ Naming convention observed across the instance: `"Display Name (CODE)"` with mat
 **Datto dynamic install script — required site variables** (full step:
 `C:\Users\DillonDaniel\.claude\projects\New Client Onboarding - All Automation Tools\Datto-Immy-site-variables-immyID-immyKey.md`):
 
-For LogicTCG’s Datto RMM **ongoing Immy install policy** (dynamic script), extract from that
+For the MSP Datto RMM **ongoing Immy install policy** (dynamic script), extract from that
 tenant’s Immy agent `msiexec` command the MSI properties `ID=` and `KEY=` and enter them as
 Datto **site variables** `immyID` and `immyKey`. The policy will not land agents for that site
 until those are set. Treat `KEY` as a secret. Confirm a pilot device checks into the right tenant.
 
 **Fallback — manual agent script:** after create/activate, ImmyBot Agent client appears at
-`GET /api/v1/provider-links/2/clients` (`externalClientId == linkedToTenantId == "<tenantId>"`). Generate non-auto-onboard script per Hard gates. Kaseya VSA provider-link id **3** was **disabled** during the RNS session — do not rely on it.
+`GET /api/v1/provider-links/{immyBotAgentProviderLinkId}/clients` (`externalClientId == linkedToTenantId == "<tenantId>"`). Generate non-auto-onboard script per Hard gates. Confirm other RMM provider-links are enabled before relying on them.
 
 **Computer list gotcha (`Verified by read-back/API test`):** `GET /api/v1/computers?tenantId=X` may return an unfiltered fleet. Always filter client-side: `Where-Object { $_.tenantId -eq $tenantId }`.
 
@@ -206,22 +206,21 @@ Optional helpers (`Verified by live Swagger` only — not yet deep-tested here):
 
 ---
 
-## Sticky facts (LogicTCG / RNS)
+## Sticky facts (per MSP instance — keep private; do not commit real ids)
 
-| Fact | Evidence |
+Look these up on your tenant before first use (`GET /api/v1/tenants`, `/api/v1/provider-links`):
+
+| Fact | How to find |
 |---|---|
-| Immy base | `https://logictcg.immy.bot` | auth connect script |
-| MSP owner tenant | id `1` Logic TCG | API list |
-| **Datto RMM provider-link (preferred enroll)** | id `69` (enabled) | Observed in RNS |
-| ImmyBot Agent provider-link | id `2` (enabled; fallback install scripts) | API list |
-| Kaseya VSA provider-link | id `3` (**disabled** as of 2026-07-21) | API list |
-| ConnectSecure provider-link | id `36` (**disabled** as of 2026-07-21) | API list |
-| RNS tenant | id `588`, slug `RNS` | Observed in RNS |
-| RNS Datto site | externalClientId `379915` → linkedToTenantId `588` | Observed in RNS |
-| Fallback non-onboarding install | `powershell-install-script-with-onboarding` + `automaticallyOnboard:false` | Observed in RNS |
-| Tenant deploy target | `AllForTenant` + `tenantId` | existing assignments |
-| Keep updated / install missing | `LatestVersion` (5) | Swagger + assignments |
-| Update only if found | `UpdateIfFound` (7) | Swagger + assignments |
+| Immy base | `IMMYBOT_BASE_URL` / connect script |
+| MSP `ownerTenantId` | tenant with `isMsp: true` |
+| Datto RMM provider-link id (preferred enroll) | provider-links list (name match) |
+| ImmyBot Agent provider-link id (fallback install scripts) | provider-links list |
+| Other RMM provider-links | confirm enabled/disabled before relying on them |
+| Fallback non-onboarding install | `powershell-install-script-with-onboarding` + `automaticallyOnboard:false` |
+| Tenant deploy target | typically `AllForTenant` + `tenantId` |
+| Keep updated / install missing | `LatestVersion` (5) |
+| Update only if found | `UpdateIfFound` (7) |
 
 ---
 
@@ -232,3 +231,4 @@ Optional helpers (`Verified by live Swagger` only — not yet deep-tested here):
 - Do not treat a single UI observation as a universal Immy guarantee — label evidence.
 - Do not enqueue maintenance sessions as part of enroll or as an automatic follow-on to deployment creation.
 - Do not use display-name-only software matching for deployments.
+

@@ -521,7 +521,7 @@ assignment** in the API, id shown in the UI URL. There is no plain `GET /api/v1/
 
 ## Tenants, enroll scripts, inventory, and tenant-scoped deployments
 
-Deep playbook (gates, RNS sticky facts, evidence labels):
+Deep playbook (gates, sticky facts, evidence labels):
 `references/tenant-onboarding-and-deployments.md`.
 
 ### Create + activate tenant
@@ -531,7 +531,7 @@ Deep playbook (gates, RNS sticky facts, evidence labels):
 $body = @{
   name = 'Customer Name (CODE)'
   slug = 'CODE'
-  ownerTenantId = 1          # Logic TCG MSP
+  ownerTenantId = $mspOwnerTenantId  # tenant with isMsp:true
   isMsp = $false
   principalId = $null        # set only when linking Azure AD
 } | ConvertTo-Json
@@ -543,7 +543,7 @@ Invoke-RestMethod -Method Patch -Uri "$immyBase/api/v1/tenants/activate/$($tenan
 
 ### Agent install script without auto-onboarding (ImmyBot Agent provider)
 
-LogicTCG provider-link id **2** (`ImmyBot Agent`) does **not** support
+The `ImmyBot Agent` provider-link on a given instance does **not** support
 `.../powershell-install-script` (NotSupported). Use the with-onboarding route and set
 `automaticallyOnboard = false`. Never log or commit the `.script` body.
 
@@ -579,7 +579,7 @@ $inv = Invoke-RestMethod -Uri "$immyBase/api/v1/tenants/software-from-inventory/
 
 ### Create a tenant-scoped software deployment
 
-`POST /api/v1/target-assignments` (`CreateLocalTargetAssignmentPayload`). Existing LogicTCG
+`POST /api/v1/target-assignments` (`CreateLocalTargetAssignmentPayload`). Existing
 tenant-wide software rows commonly use `targetType = AllForTenant` (21) + `tenantId`:
 
 ```powershell

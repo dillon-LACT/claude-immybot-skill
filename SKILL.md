@@ -20,7 +20,7 @@ Checklist (ask before **every** mutation; read-only discovery is fine):
 
 1. **Identity invariant** — confirm `{Immy tenant name+id, provider-link name+id, RMM customer/site name+id, expected device count}` (+ hostname sample) before any customer-scoped write.
 2. **Create tenant** — `POST /api/v1/tenants` (`name` unique, `ownerTenantId` = MSP, optional Azure `principalId`), then `PATCH /api/v1/tenants/activate/{id}`.
-3. **Enroll without sessions** — **prefer Datto RMM** (LogicTCG provider-link id **69**): link the Datto site/client to the Immy tenant, then let agents sync. Confirm `linkedToTenantId` and that devices land under the right tenant with no onboarding sessions. Manual ImmyBot Agent PowerShell install (`.../powershell-install-script-with-onboarding` + `automaticallyOnboard=false`) is fallback only. Never paste raw install scripts into the skill/Slack/board. Pilot one device when using the script path.
+3. **Enroll without sessions** — **prefer Datto RMM** (your Datto RMM provider-link id): link the Datto site/client to the Immy tenant, then let agents sync. Confirm `linkedToTenantId` and that devices land under the right tenant with no onboarding sessions. Manual ImmyBot Agent PowerShell install (`.../powershell-install-script-with-onboarding` + `automaticallyOnboard=false`) is fallback only. Never paste raw install scripts into the skill/Slack/board. Pilot one device when using the script path.
 4. **Inventory** — prefer `GET /api/v1/tenants/software-from-inventory/{tenantId}`. Refresh jobs need
    their own approval + completeness threshold before shortlisting.
 5. **Deployments** — shortlist significant apps already in Immy (match by software id +
