@@ -23,6 +23,21 @@ Swagger specs and APIs, not guessed from general docs.
 - End-to-end **software install / deploy playbook** (primary-user targeting, catalog check,
   installer ask-first, ad-hoc + ongoing, offline/reboot prompts).
 
+## [1.6.0] - 2026-07-22
+
+### Added
+- **Dynamic Versions playbook** (sampled 200 Global category-9 scripts; strategy sanity on 500):
+  decision tree for shared Function helpers (`Get-DynamicVersionFromInstallerURL`,
+  `Get-DynamicVersionsFromURL`, `Get-DynamicVersionsFromGitHubUrl`, UriRedirect, SourceForge,
+  AppInstaller, Microsoft LinkID, etc.), return envelope (`Versions = @(New-DynamicVersion …)`),
+  named-capture conventions (`Version`/`Uri`/`FileName`/`Architecture`), helper parameter
+  cheat-sheet, `$SoftwareName` / `$DownloadURL` binding notes, authoring checklist, anti-patterns.
+- Confirmed **`scriptExecutionContext = 4` on every Global DynamicVersions script sampled**
+  (outside Swagger’s documented 0–3 string enum) — copy from a live DV script when creating one.
+- Synced newer skill content into this repo (tenant onboarding/deployments reference, software
+  detection triage, install playbook / post-session follow-up, etc.) — still env-var auth only;
+  no tenant secrets.
+
 ## [1.4.0] - 2026-07-16
 
 ### Changed

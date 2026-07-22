@@ -1,7 +1,7 @@
 ---
 name: immybot
-description: This skill should be used when working with ImmyBot — an RMM/MSP automation platform. Covers calling the ImmyBot REST API (OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions), the end-to-end software install/deploy playbook (identify via primary user, catalog check, upload/analyze, ad-hoc + ongoing deployments), and writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks with test-get-set, Invoke-ImmyCommand and other built-in Immy cmdlets). Trigger on "ImmyBot", "immy.bot", "push a script to Immy", "install software", "deploy software", "detection script", "dynamic versions script", "config task", "maintenance task", "Invoke-ImmyCommand", or RMM software-deployment automation.
-version: 1.4.3
+description: This skill should be used when working with ImmyBot — an RMM/MSP automation platform. Covers calling the ImmyBot REST API (OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions), creating Immy tenants and enrolling RMM devices without onboarding sessions, inventory-then-tenant-scoped deployments (LatestVersion / UpdateIfFound), the end-to-end software install/deploy playbook (identify via primary user, catalog check, upload/analyze, ad-hoc + ongoing deployments), software detection triage (SoftwareTable name/mode mismatches, Regex exact-match, read-only detection previews), post-session verification + Thread customer follow-up (@mentions from session results), and writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks with test-get-set, Invoke-ImmyCommand and other built-in Immy cmdlets). Trigger on "ImmyBot", "immy.bot", "create Immy tenant", "enroll from RMM", "inventory then deployments", "push a script to Immy", "install software", "deploy software", "check sessions", "timed install", "detection script", "detection failing", "software table name", "dynamic versions script", "config task", "maintenance task", "Invoke-ImmyCommand", or RMM software-deployment automation.
+version: 1.6.0
 ---
 
 # ImmyBot
@@ -9,6 +9,30 @@ version: 1.4.3
 ImmyBot is an RMM automation platform (MSP-focused). Tenants run at `https://<subdomain>.immy.bot`.
 Everything below was verified against live ImmyBot Swagger specs and APIs — not guessed from
 general docs. See `references/` for the deep dives; this file is the map.
+
+## Tenant onboarding + present-software deployments (new customer)
+
+When asked to stand up Immy for a customer that already has devices in the MSP RMM — create
+tenant → enroll without sessions → inventory → tenant-scoped deployments — follow
+**`references/tenant-onboarding-and-deployments.md`**. Do not invent a parallel process.
+
+Checklist (ask before **every** mutation; read-only discovery is fine):
+
+1. **Identity invariant** — confirm `{Immy tenant name+id, provider-link name+id, RMM customer/site name+id, expected device count}` (+ hostname sample) before any customer-scoped write.
+2. **Create tenant** — `POST /api/v1/tenants` (`name` unique, `ownerTenantId` = MSP, optional Azure `principalId`), then `PATCH /api/v1/tenants/activate/{id}`.
+3. **Enroll without sessions** — **prefer Datto RMM** (LogicTCG provider-link id **69**): link the Datto site/client to the Immy tenant, then let agents sync. Confirm `linkedToTenantId` and that devices land under the right tenant with no onboarding sessions. Manual ImmyBot Agent PowerShell install (`.../powershell-install-script-with-onboarding` + `automaticallyOnboard=false`) is fallback only. Never paste raw install scripts into the skill/Slack/board. Pilot one device when using the script path.
+4. **Inventory** — prefer `GET /api/v1/tenants/software-from-inventory/{tenantId}`. Refresh jobs need
+   their own approval + completeness threshold before shortlisting.
+5. **Deployments** — shortlist significant apps already in Immy (match by software id +
+   Global/Local). Desired states are **not** interchangeable: `LatestVersion` (5) ≈ keep updated /
+   install if missing; `UpdateIfFound` (7) ≈ update only where found. Tenant scope is typically
+   `targetType = AllForTenant` + `tenantId`. Full deployment approval = manifest; read back after
+   each create. Do **not** enqueue fleet sessions unless explicitly asked — but document whether
+   saving the assignment will ride an existing schedule.
+6. **Tracking** — Thread = operational source of truth; board card = status/time; Slack only if
+   post-worthy and sanitized.
+
+Label durable notes as `Observed` / `Swagger` / `read-back` / `Unresolved` (see the reference doc).
 
 ## Software install / deploy playbook (ALL software)
 
@@ -62,8 +86,73 @@ one-off process. Applies to **every** title (CAD apps, browsers, vendor tools, e
     so updates and new matching machines stay covered on later maintenance.
 12. **Ask before blasting the fleet** — enqueue one target first, confirm the queued session in the
     UI looks right (time, Force, offline behavior, business-hours suppress), then clone the rest.
+13. **Always follow up after sessions complete** — do not leave timed/overnight installs as
+    “queued and forgotten.” See **Post-session follow-up (Thread)** below. Record session IDs when
+    you enqueue; check results; **@mention each affected user** on the ticket with their outcome;
+    log time; move the ticket to QAQC (or keep open on failures). Prefer scheduling that follow-up
+    when you enqueue (next morning / after the last window).
 
 Keep primary users and person↔computer links current; the playbook depends on them.
+
+## Post-session follow-up (Thread) — mandatory after deploy work
+
+Customer-facing software installs (especially **timed overnight ad-hoc**) are not done when the
+session is queued. Close the loop the next morning (or once sessions finish):
+
+### When you enqueue (same day)
+
+1. **Capture session IDs** in an **internal** Thread note + board activity (person → hostname →
+   session id → scheduled local time). Timed `run-immy-service-new` returns **202 empty** when a
+   `sessionGroupId` is used — look up the created sessions in Immy (or note IDs from the UI) and
+   write them down immediately.
+2. **Schedule the follow-up** so it is not forgotten:
+   - **Preferred:** Thread `schedule_ticket` for Dillon the **next business morning** (or ~1h after
+     the last install window) with a description like: *Check Immy sessions \<ids\>; @mention users
+     with Success/Failed; QAQC or rerun failures.*
+   - **Same-session / still running:** Cursor loop / reminder to re-check until terminal status.
+   - Do **not** schedule a customer-visible “it worked” note blindly — the follow-up must read
+     live session/action results first.
+
+### When you check results
+
+1. **Prefer known session IDs** — `GET /api/v1/maintenance-sessions/{id}` then actions via
+   `/api/v1/maintenance-actions/dx` with `filter=[["maintenanceSessionId","=",id]]`.
+   - `sessionStatus` / `executionStageStatus`: `0=Passed`, `1=Running`, `2=Failed`.
+   - On actions: `result` `1=Success`, `2=Failed` — read `resultReasonMessage` on failures
+     (timeouts, “no version found”, etc.).
+2. **If IDs were lost** — query `/maintenance-actions/dx` in **narrow UTC hour windows**
+     (`requireTotalCount=false`), filter client-side by `tenantName` / software display name, or
+     by `computerId`. Do **not** pull multi-day windows in one call (timeouts). Filter out
+     `actionType=0` (NoAction) when hunting installs.
+3. **Map computer → person** via `GET /api/v1/computers/{id}` → `primaryPerson`
+     (`displayName`, `emailAddress`). List endpoints often omit person fields — use per-ID GET.
+4. **Thread customer reply with @mentions (per person, not one vague blast):**
+   - `search_contacts` to resolve names already on the ticket when needed.
+   - Customer-visible `add_ticket_note` (`is_internal: false`) — address **each** user by name and
+     state **their** machine + outcome. Prefer **one note per person** when several people are on
+     the ticket (clearer than one mega-reply).
+   - **Mention gotcha (MCP):** blocked on no secondary-resource / mention tool — `@Name` in
+     `add_ticket_note` is plain text (see thread-ticket-ops **@mentions**). Still use `@First Last`
+     for readability; for a real Inbox ping, re-@ in Thread UI (or a proven secondary-resource path).
+     `send_to_email` only when Dillon asks.
+   - **Success:** ask them to open/launch the app, confirm it looks good, and reply on the ticket
+     if anything is wrong.
+   - **Failed / partial (multi-machine user):** say we’re still fixing / ask to reschedule a rerun
+     (same window when that was the prior plan); do **not** ask them to “verify the install” as if
+     it succeeded. Include a short honest reason when it helps (timeout, detection miss) without
+     dumping raw logs.
+5. **Ticket hygiene:** `log_time_entry` for the check + follow-up; set status **QAQC** when
+   successes are ready for customer validation (keep ticket open / Work in Progress if critical
+   targets still failed — note failures internally and plan reruns).
+6. **Board:** activity note with the same Success/Failed table; keep the card `in_progress` +
+   weekly deliverable while hours should show on the grid.
+
+### Why schedule from Immy output (not a fixed canned reply)
+
+Immy session results are the source of truth. A scheduled Thread calendar entry (or agent reminder)
+should trigger **“read sessions → draft @mentions from results → post”**, never a pre-written
+“all good” message. Partial failures are common (timeouts, detection lag, offline apply-on-connect
+still pending) — treat them explicitly.
 
 ## Auth (do this first)
 
@@ -140,8 +229,49 @@ Read `references/scripting-guide.md` before writing any ImmyBot script — it ha
 `ScriptCategory`/`ScriptExecutionContext` semantics, the verified `Invoke-ImmyCommand` signature, all
 43 built-in `*-Immy*` cmdlets, and worked examples (detection, dynamic-versions, config task).
 
+**Dynamic Versions (category 9)** — prefer existing Global software with a working DV script; when
+authoring Local, **call a shared `Function` helper** (`Get-DynamicVersionFromInstallerURL`,
+`Get-DynamicVersionsFromURL`, `Get-DynamicVersionsFromGitHubUrl`, etc.) instead of hand-rolling
+HTTP/regex. Copy `scriptExecutionContext = 4` from a live DV script (not Metascript `2`). Full
+decision tree, helper params, return envelope, and named-capture conventions live in
+`references/scripting-guide.md` → **Dynamic Versions playbook**.
+
 Read `references/api-reference.md` before calling the REST API — it has pagination/filter query params,
-the script-push pattern, ad-hoc script execution, and maintenance-session rerun/status endpoints.
+the script-push pattern, ad-hoc script execution, maintenance-session rerun/status endpoints,
+local-software PATCH, and `run-immy-service-new` phase flags (`detectionOnly` / `inventoryOnly` / etc.).
+
+## Software detection triage (false “missing” installs)
+
+When impact reports / sessions say install/repair because software “wasn’t installed yet,” but operators
+suspect it **is** installed — check detection before reinstalling:
+
+1. **Read the software record** — `GET /api/v1/software/local/{id}` (or global). Note
+   `detectionMethod`, `softwareTableName`, `softwareTableNameSearchMode`, `upgradeCode`.
+2. **Read endpoint inventory** — `GET /api/v1/computers/{computerId}/detected-computer-software`.
+   Compare installed `softwareName` rows to `softwareTableName`. If inventory shows the real app name
+   but detection is pointed at a different string, Immy will keep trying to install.
+3. **`SoftwareTable` + `Contains` is a substring trap.** Example (verified OUN / UNIFI): table name
+   `UNIFI` with Contains also matches **Chaos Unified Login** (`Unified` contains `unifi`). Prefer
+   **`softwareTableNameSearchMode = Regex`** with an anchored pattern, e.g. `(?i)^UNIFI$`, when the
+   display name must be exact (case-insensitive). Wrong table name is worse — e.g. detecting
+   `Content Catalog` while inventory says `UNIFI` → fleet-wide false missing.
+4. **Patch local software** — `PATCH /api/v1/software/local/{id}` with
+   `UpdateLocalSoftwareRequestBody` (replace-style: send current fields + the detection fix;
+   include `*ScriptType` `Global`/`Local` for script refs). Read back `softwareTableName` + mode.
+5. **Preview before fleet** — do **not** enqueue installs to validate detection. Run a **read-only**
+   Metascript via `POST /api/v1/scripts/run` (`scriptExecutionContext = 2`) that
+   `Invoke-ImmyCommand`s uninstall-key enumeration and applies the **same** regex/logic. Confirm
+   `WouldDetect=true` and that near-miss names are excluded. Optionally use
+   `run-immy-service-new` with `detectionOnly: true` (no install) — see api-reference.
+6. **Then install on a pilot** — `POST /api/v1/run-immy-service-new` with
+   `maintenanceType: LocalSoftware` (or Global), `maintenanceIdentifier: "<softwareId>"`,
+   `desiredSoftwareState: LatestVersion`, `computers: [{ computerId }]`, null `updateTime` for now.
+   Returns **202** empty when `sessionGroupId` is set — resolve session via
+   `/maintenance-sessions/dx` filtered by `computerId` (newest), then poll
+   `/maintenance-sessions/{id}` + `/maintenance-actions/dx`.
+
+Full field notes: `references/scripting-guide.md` (Software entity). Wire examples:
+`references/api-reference.md` (PATCH software + run-immy flags + session lookup).
 
 ## Gotchas (bite people every time)
 
@@ -151,9 +281,16 @@ the script-push pattern, ad-hoc script execution, and maintenance-session rerun/
   queued session. (Caught live on a timed `run-immy-service-new` ad-hoc — UI defaults often leave it on.)
 - Timed ad-hoc installs use `POST /api/v1/run-immy-service-new` with `updateTime` (`HH:mm`), not
   weekly `/schedules`, and not immediate `scripts/run`. Null `updateTime` = run now.
+- **After any timed/overnight deploy: follow up.** Record session IDs at enqueue time; next morning
+  (or via Thread `schedule_ticket` / agent reminder) read session+action results, @mention each
+  user with Success vs Failed, log time, QAQC. Never post a canned “all good” before reading Immy.
 - Script body field is `action`, not `scriptContent`.
 - List-style GET endpoints (e.g. `maintenance-sessions?computerId=X`) return the HTML SPA instead of
   JSON — only per-ID GETs (`/maintenance-sessions/{id}`) work through the API.
+- **`/maintenance-actions/dx` OR filters across multiple `maintenanceSessionId`s → 500.** One session
+  per call. Wide multi-day pulls time out — use hour/day windows with `requireTotalCount=false`.
+- Computer **list** responses often omit `primaryPerson`; use `GET /api/v1/computers/{id}` for
+  displayName/email when drafting Thread @mentions.
 - Raw API JSON serializes enum fields (`scriptCategory`, `scriptExecutionContext`, etc.) as **integers**,
   and those integers do **not** reliably match the declaration order shown in the Swagger enum
   description. Don't compute an enum's integer from its position in the doc — fetch a real existing
@@ -188,6 +325,22 @@ the script-push pattern, ad-hoc script execution, and maintenance-session rerun/
   Computers.
 - `GET /api/v1/computers` uses plain `name`/`tenantId` query params, not the `Filters=` Sieve
   syntax that `/scripts` and `/software` use — check each route's own params in Swagger.
+  **Gotcha:** `?tenantId=` is unreliable in practice — always filter the list client-side on
+  `.tenantId` before trusting scope. The unfiltered list is often **incomplete / not a full
+  fleet dump** — for “online machines in tenant X,” prefer Thread MCP `search_immybot_computers`
+  (`tenant_id` + `online`) or per-name lookups, then `GET /api/v1/computers/{id}`.
+- **Per-ID computer GETs use `computerName`, not `name`.** List/search payloads often expose
+  `name`; `GET /api/v1/computers/{id}` returns `computerName` (plus `isOnline`, `tenantId`,
+  `primaryPerson`, …). Don’t assume one property name everywhere.
+- **SoftwareTable `Contains` ≠ exact name.** Substring matches cause false positives
+  (`UNIFI` ⊆ `Chaos Unified Login`). For exact display-name detection use Regex
+  `(?i)^DisplayName$` (or UpgradeCode/ProductCode when MSI identity is stable).
+- **False missing installs are often detection, not package.** If inventory already has the app
+  under the real name but sessions keep Install/Repair-missing, fix `softwareTableName` /
+  search mode (or custom detection) before blasting reinstalls.
+- New-customer tenant / enroll / inventory / tenant deployments: see
+  **Tenant onboarding + present-software deployments** above and
+  `references/tenant-onboarding-and-deployments.md`.
 - `POST /api/v1/scripts/run` lets you test a script/task against a computer with parameter and
   variable overrides (e.g. simulate `$method`) without deploying anything — see
   `references/api-reference.md`. For anything unproven, prefer a strictly read-only preview variant

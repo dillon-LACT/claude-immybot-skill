@@ -13,14 +13,21 @@ A `Script` record: `name`, `action` (the actual PS/CMD body), `scriptLanguage`, 
 `CommandLine = 1`, `PowerShell = 2`. (Confirmed directly in the enum description — this one's stable.)
 
 ### ScriptExecutionContext
-Declared as `System, CurrentUser, Metascript, CloudScript` — but **do not assume 0-3 in that order**.
-A confirmed example (`Stop Onboarding for Windows Home Set Script`, which calls `Stop-ImmySession`, a
-Metascript-only cmdlet) had `scriptExecutionContext = 2`, consistent with `Metascript` being index 2 —
-but a Dynamic Versions script was seen with value `4`, outside the documented 0-3 range, meaning the
-real backing enum has more values than the four documented ones (likely an internal/legacy value).
-**Don't compute this from declaration order — copy the value from an existing script of the same kind.**
+Swagger documents four string names (`System`, `CurrentUser`, `Metascript`, `CloudScript`) — but
+**raw API JSON often returns integers that do not reliably match declaration order.** Confirmed
+live samples:
 
-| Context | Meaning |
+| Integer (API) | Typical use (observed) |
+|---|---|
+| `0` | `System` — install/uninstall version-action scripts on the endpoint |
+| `2` | `Metascript` — Function helpers, most DownloadInstaller scripts, many detections |
+| `4` | **Every Global DynamicVersions script sampled (n=500)** — copy this when creating DV scripts |
+
+`4` is **outside** Swagger's documented 0–3 string enum. Treat it as the required context for
+Dynamic Versions discovery (backend version-resolution host). **Don't invent the integer — copy
+from an existing script of the same category.**
+
+| Context name | Meaning |
 |---|---|
 | `System` | Runs on the target computer under the local SYSTEM account |
 | `CurrentUser` | Runs on the target computer in the interactive user's session |
@@ -125,11 +132,22 @@ software-table-based detection — see the Google Chrome example below.
 
 ## Software entity — the fields that matter
 
-`GET /api/v1/software/global/{id}` returns (trimmed to the load-bearing fields):
+`GET /api/v1/software/global/{id}` (and the parallel `/software/local/{id}`) returns (trimmed to the
+load-bearing fields):
 
 - `detectionMethod`: `SoftwareTable` (match installed-programs table by name — pairs with
   `softwareTableName` + `softwareTableNameSearchMode`) | `CustomDetectionScript` (pairs with
   `detectionScriptId`) | `UpgradeCode` | `ProductCode` (MSI-based matching).
+- `softwareTableName` + `softwareTableNameSearchMode` when using `SoftwareTable`:
+  - Modes: `Contains` (0) | `Regex` (1) | `Traditional` (2).
+  - **`Contains` is substring match** — dangerous for short names. Verified: pattern `UNIFI` also
+    matches **Chaos Unified Login** because `Unified` contains `unifi`.
+  - For exact display-name detection prefer **`Regex`** with an anchored, case-insensitive pattern,
+    e.g. `(?i)^UNIFI$`. That still matches `UNIFI` / `Unifi`, and excludes Chaos Unified Login.
+  - The table name must match what inventory actually stores (`detected-computer-software`
+    `.softwareName`). A stale wrong name (verified: detecting `Content Catalog` while inventory
+    shows `UNIFI`) produces fleet-wide “missing → install/repair” failures even when the app is
+    present. Inventory rows also won’t link to the software id until the name/mode lines up.
 - `useDynamicVersions` (bool) + `dynamicVersionsScriptId` — when true, versions come from running a
   script instead of being declared statically; `downloadInstallerScriptId` fetches the actual
   installer payload for a resolved dynamic version.
@@ -142,6 +160,11 @@ software-table-based detection — see the Google Chrome example below.
 - `postInstallScriptId` / `postUninstallScriptId` — optional scripts after a successful action.
 - `licenseRequirement`: `None | Required | Optional`, `licenseType`: `None | LicenseFile | Key`.
 - `rebootNeeded` (bool), `installOrder` (int, sequences multi-software deployments).
+
+**Update local software detection:** `PATCH /api/v1/software/local/{softwareIdentifier}` with
+`UpdateLocalSoftwareRequestBody` (see `api-reference.md`). Treat it as replace-style for the fields
+you send — rebuild from a fresh GET, change `softwareTableName` / `softwareTableNameSearchMode`
+(and keep script ids + `*ScriptType` `Global`/`Local`). Always GET read-back before declaring fixed.
 
 ## Maintenance Task (= "Config Task") — test/get/set pattern
 
@@ -207,17 +230,172 @@ try {
 ```
 Detection scripts return a **version string** if installed, `$null` if not — not a boolean.
 
-## Dynamic Versions script — real working example
+## Dynamic Versions playbook
 
-`scriptCategory = DynamicVersions (9)`. A tiny wrapper around a shared helper function that lives as
-its own `Function`-category script in the catalog:
+Verified against **200 Global `scriptCategory=9` scripts** (plus strategy sanity on 500 total) and
+the live Function helpers they call. Official docs say return objects with at least Version + URL;
+the Global catalog almost always does that via helpers that wrap `New-DynamicVersion`.
+
+### What Dynamic Versions are for
+
+On a Software record, set `useDynamicVersions = true` and point `dynamicVersionsScriptId` at a
+category-9 script. At resolve time Immy runs that script to discover available versions (and their
+download URLs) instead of relying on statically uploaded `softwareVersions`. Pair with
+`downloadInstallerScriptId` when the default download path is insufficient (auth, UA spoofing,
+endpoint-side fetch). Prefer an existing **Global** title that already has a working DV script
+before authoring a Local one.
+
+### Fields to set on the script (copy from a live DV script)
+
+| Field | Observed value (Global sample) |
+|---|---|
+| `scriptCategory` | `9` (`DynamicVersions`) |
+| `scriptExecutionContext` | **`4`** (all 500/500 sampled — **not** Metascript `2`) |
+| `scriptLanguage` | `2` (`PowerShell`) |
+| `outputType` | `0` (`Object`) |
+| `timeout` | usually null/default (~86%); bump to `30`–`60` for redirects/scrapes; `300` only for heavy work |
+
+Body field is still `action`. Most scripts are short: ~70% under 300 chars (one helper call).
+
+### Decision tree — pick the thinnest helper that fits
+
+1. **Stable direct installer URL** (version is in the file / PE metadata) →
+   `Get-DynamicVersionFromInstallerURL` (~42% of first 200)
+2. **Vendor HTML/JSON page with regex-able links** →
+   `Get-DynamicVersionsFromURL -URL … -VersionsURLPattern '…'` (~23%)
+3. **GitHub Releases assets** →
+   `Get-DynamicVersionsFromGitHubUrl -GitHubReleasesUrl … -VersionsPattern '…'` (~12%)
+4. **aka.ms / fwlink / “latest” URL that 302s into a versioned filename** →
+   `Get-DynamicVersionFromUriRedirect` (or `Get-RedirectedUri` + `Get-DynamicVersions`)
+5. **SourceForge** → `Get-DynamicVersionsFromSourceForgeUrl`
+6. **MSIX `.appinstaller` XML** → `Get-DynamicVersionFromAppinstallerURL`
+7. **Microsoft download LinkID / go.microsoft.com** → `Get-DynamicVersionFromMicrosoftLinkId`
+8. **Vendor-specific** (rare) → `Get-DynamicVersionsFromDell`, `Get-DynamicVersionsFromBrother`, etc.
+9. **Only if none of the above fit** → scrape yourself, then `New-DynamicVersion` + return envelope
+
+Browse helpers: `GET /api/v1/scripts/global?Filters=scriptCategory==7&PageSize=50` (or
+`/scripts/global/names` and filter names starting with `Get-Dynamic` / `New-Dynamic`).
+
+### Return envelope (required shape)
+
+Helpers return (and custom scripts should return) a single object:
+
 ```powershell
-Get-DynamicVersionFromInstallerUrl "https://download.tekla.com/download-trimble-connect"
+New-Object PSObject -Property @{
+    Versions = @(
+        New-DynamicVersion -Uri $Uri -Version $Version -FileName $FileName
+        # optional: -Architecture X64 -PackageHash $md5 -PackageType Executable|Zip -DependsOnVersion $v
+    )
+}
 ```
-The pattern: dynamic-versions scripts are usually one-liners that call a shared, reusable
-`Function`-category helper (loaded automatically into the Metascript runspace) rather than
-reimplementing HTTP/parsing logic per software title. Check `/api/v1/scripts/global?Filters=scriptCategory==7`
-for other shared helpers before writing your own from scratch.
+
+`New-DynamicVersion` params (Function id in Global catalog): `-Uri` (alias `-URL`), mandatory
+`-Version` (`[Version]`), optional `-FileName`, `-PackageHash` (MD5; alias `-FileHash`),
+`-PackageType` (`Executable`|`Zip`), `-Architecture` (`X86`|`X64`|`AMD64`|`ARM64`|`i386`),
+`-DependsOnVersion`, `-RelativeCacheSourcePath`. Filename is inferred from the URI when omitted.
+**~65% of Global DV scripts are a bare helper call** — the helper emits this envelope for you; no
+explicit `return` needed.
+
+### Named capture groups (regex helpers)
+
+For `Get-DynamicVersionsFromURL` / `Get-DynamicVersions` / GitHub / SourceForge patterns, use
+**named** groups. Most common in the wild:
+
+| Group | Role |
+|---|---|
+| `Version` | **Required** — parsed as `[Version]` |
+| `Uri` / `RelativeUri` | Download URL (relative URIs rewritten against the page URL) |
+| `FileName` | Installer filename |
+| `Architecture` / `Bitness` | Arch filter (`x64`/`x86`/`64`/…) |
+| `RelativeCacheSourcePath` | Path inside a zip package |
+
+Example URL scrape:
+```powershell
+Get-DynamicVersionsFromURL `
+    -URL "https://iriun.com" `
+    -VersionsURLPattern '(?<Uri>https://cdn.example/(?<FileName>App-(?<Version>\d+\.\d+(?:\.\d+){0,2}).exe))'
+```
+
+Example GitHub:
+```powershell
+Get-DynamicVersionsFromGitHubUrl `
+    -GitHubReleasesUrl 'https://github.com/Zettlr/Zettlr/releases' `
+    -VersionsPattern "Zettlr-(?<Version>[\d\.]+)-x64.exe"
+```
+
+Example installer URL (no regex):
+```powershell
+Get-DynamicVersionFromInstallerURL "https://secure.example.com/product.msi"
+```
+
+Example redirect “latest” link:
+```powershell
+Get-DynamicVersionFromUriRedirect "https://aka.ms/cosmosdb-emulator"
+```
+
+### Helper parameter cheat-sheet (live Function scripts)
+
+- **`Get-DynamicVersionFromInstallerURL`** — `-URL` (mandatory), `-VersionIfNull`, `-FileNameIfNull`,
+  `-ResolveRedirect`, `-Force`. Reads version from the installer when possible.
+- **`Get-DynamicVersionsFromURL`** — `-URL`, `-VersionsURLPattern` (mandatory); optional
+  `-VersionURLRewrite`, `-VersionRewrite`, `-FileNameRewrite`, `-SortGroup`/`-SortOrder` (default
+  Version/Descending), `-VersionCountLimit` (default 10), `-PreventVersionsWithBadUri`,
+  `-RelativeCacheSourcePath`, `-TTL` (default 1 day cache), `-UserAgent`, `-Headers`.
+- **`Get-DynamicVersions`** — same rewrite/sort/limit knobs, but `-InputString` + `-VersionsPattern`
+  (parse an already-fetched string / redirected URL).
+- **`Get-DynamicVersionsFromGitHubUrl`** — `-GitHubReleasesUrl`, `-VersionsPattern`; optional
+  `-DynamicVersionFilter` (scriptblock), `-VersionsField` (default `browser_download_url`),
+  `-IncludedParentFields`, `-VersionRewrite`/`-FileNameRewrite`/`-UrlRewrite`, `-PerPage`,
+  `-LatestRelease`.
+- **`Get-DynamicVersionsFromSourceForgeUrl`** — `-SourceForgeProjectName`, `-VersionsPattern`;
+  optional filters/rewrites; can populate `PackageHash` from SourceForge `md5sum`.
+- **`Get-DynamicVersionFromUriRedirect`** — `-Uri`, optional `-Pattern` (default version-in-URL),
+  `-MaximumRedirection`, `-Method` HEAD|GET.
+- **`Get-RedirectedUri`** — resolve a 302/307 to the final URL (supports `-UserAgent` / method
+  fallback). Compose with `Get-DynamicVersions` when you need a custom pattern on the final URL.
+- **`Invoke-CommandCached`** — `-CacheKey`, `-ScriptBlock`, optional `-TTL` (default 1 day),
+  `-ForceUpdate`. Use around expensive redirects/API calls (seen with Splashtop-style streams).
+- **`Get-UserAgentString`** — browser UA when a vendor blocks default PowerShell clients.
+- **`Get-FileNameFromUri`** — Content-Disposition / path segment filename helper.
+
+### Implicit / software-bound variables
+
+When the DV script is attached to Software, Immy may bind:
+
+- **`$SoftwareName`** — display name of the software. Common pattern for multi-edition titles
+  (`.NET SDK 6.0 (x86)`, `FileMaker Pro 2025 (x64)`, `MYOB AccountRight 2024`): default it if
+  unset, then parse edition/arch/year out of the string to pick the right download.
+- **`$DownloadURL`** — pre-supplied URL (parameterized / config-task driven). Used by thin wrappers
+  that just wrap `New-DynamicVersion -Uri $DownloadURL -Version 1.0`.
+- Rewrite knobs on helpers (`-VersionRewrite`, `-FileNameRewrite`) support `$Var` substitution from
+  named capture groups.
+
+Do **not** put tenant secrets, API keys, or per-customer tokens in Global DV scripts. Customer-
+specific download URLs belong in Local software parameters / DownloadInstaller auth headers.
+
+### Authoring checklist
+
+1. Search Global software for the title — reuse if DV already works.
+2. If writing Local: `scriptCategory=9`, **`scriptExecutionContext=4`**, PowerShell, short `action`.
+3. Prefer a one-liner helper call; only hand-roll when helpers cannot express the source.
+4. Return the `Versions` envelope (or let the helper return it). Never return a bare string/bool.
+5. Keep regex patterns anchored to the real CDN filename; include `FileName` when the URI alone is
+   ambiguous.
+6. Leave timeout default unless the source is slow; cache redirects with `Invoke-CommandCached`.
+7. Wire `useDynamicVersions` + `dynamicVersionsScriptId` (+ DownloadInstaller if needed) on the
+   Software record; smoke-test by resolving versions in the UI / script editor (DV editor can run
+   without picking a tenant).
+8. Default new MSP work to **Local** catalog — only Global if you intend a public contribution.
+
+### Anti-patterns (seen in the wild — avoid for new Local work)
+
+- Reimplementing GitHub/SourceForge/page scrape when a Function helper already exists.
+- Using Metascript context `2` for a new DV script (Global DV is consistently `4`).
+- Returning a single `PSCustomObject` with `Version`/`URL` at the root **without** the
+  `Versions = @(...)` wrapper — helpers and most Global scripts use the wrapper; stick to it.
+- Embedding customer API keys in the script body (use parameters / Local DownloadInstaller).
+- Multi-thousand-line decryption/CLM experiments in production DV scripts — keep discovery thin;
+  push complexity into a Function helper if it must be shared.
 
 ## SoftwareVersionAction — install/uninstall real examples
 
@@ -319,36 +497,6 @@ if ($ExpectedHash -notlike $ActualHash) {
 ```
 
 Built-in helpers seen in the wild for this category: `Download-File`, `Get-UserAgentString`.
-
-## More DynamicVersions real examples
-
-The dominant pattern is a one-liner wrapping a shared `Function`-category helper that does regex
-scraping of a vendor download page — don't write custom `Invoke-WebRequest`/regex logic per software
-title if one of these already exists:
-
-```powershell
-Get-DynamicVersionsFromURL `
-    -URL "https://www.logitech.com/en-ca/software/capture.html" `
-    -VersionsURLPattern '(?<Uri>https://download01.logi.com/.../Capture_(?<Version>\d+\.\d+(?:\.\d+){0,2}).exe)'
-```
-
-For sources that need real scraping/pagination logic instead of a single regex, the script calls
-`Invoke-WebRequest` directly and builds versions manually with the `New-DynamicVersion` helper
-(`-Uri`, `-Version`, `-FileName`) — return a collection of these, optionally filtered by a caller-
-supplied version parameter:
-```powershell
-$Versions = $response.Links | Where-Object { $_.OuterHtml -like "*x.x*" } | ForEach-Object {
-    $Link = (Invoke-WebRequest "$BaseUrl$($_.href)").Links | Where-Object { $_.href -like "*downloads*" } | Select-Object -Expand href
-    if ($Link) { New-DynamicVersion -Uri $Link -Version ($Link[-1] + ".0") -FileName 'Setup.exe' }
-}
-if ($RequestedVersion) {
-    $Versions | Where-Object { ([Version]$_.Version).Major -like $RequestedVersion }
-} else {
-    New-Object PSObject -Property @{ Versions = $Versions }
-}
-```
-Built-in helpers seen: `Get-DynamicVersionFromInstallerUrl` (single known URL, no scraping needed),
-`Get-DynamicVersionsFromURL` (URL + regex pattern), `New-DynamicVersion` (manual construction).
 
 ## FilterScriptDeploymentTarget / MetascriptDeploymentTarget — real examples
 

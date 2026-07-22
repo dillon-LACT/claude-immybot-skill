@@ -4,6 +4,7 @@ A [Claude Code](https://claude.com/claude-code) skill for working with [ImmyBot]
 
 - Calling the ImmyBot REST API (Azure AD OAuth2 client-credentials auth, global/local script and software catalogs, maintenance sessions)
 - An end-to-end **software install / deploy playbook** (identify via primary user, catalog check, upload/analyze, ad-hoc + ongoing deployments, offline and reboot prompts)
+- A **Dynamic Versions playbook** (which shared helper to call, return envelope, context=`4`, named-capture regex conventions)
 - Writing ImmyBot PowerShell content (detection scripts, dynamic-version scripts, install/uninstall scripts, config/maintenance tasks, `Invoke-ImmyCommand` and other built-in Immy cmdlets)
 
 Everything in this skill was verified live against a real ImmyBot tenant's Swagger spec and API, not guessed from general docs.
@@ -37,7 +38,8 @@ Then dot-source `scripts/Connect-ImmyBot.template.ps1` (copy it into your own pr
 
 - `SKILL.md` — entry point Claude reads first: auth, core concepts, and known gotchas
 - `references/api-reference.md` — REST API details: pagination/filter params, script-push pattern, ad-hoc execution, maintenance-session endpoints
-- `references/scripting-guide.md` — PowerShell content guide: script categories/execution contexts, the full `Invoke-ImmyCommand` signature, all built-in `*-Immy*` cmdlets, and real worked examples
+- `references/scripting-guide.md` — PowerShell content guide: script categories/execution contexts, Dynamic Versions playbook, `Invoke-ImmyCommand`, built-in `*-Immy*` cmdlets, worked examples
+- `references/tenant-onboarding-and-deployments.md` — new-customer tenant create, enroll, inventory, tenant-scoped deployments
 - `scripts/Connect-ImmyBot.template.ps1` — copy-paste auth template, reads from env vars
 
 ## Changelog

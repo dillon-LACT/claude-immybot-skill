@@ -99,6 +99,29 @@ POST /api/v1/software/global/upload
 Full field list (detection method, install/uninstall/test/upgrade/repair script IDs, dynamic-versions
 config, licensing) is in `references/scripting-guide.md` — it's the wire shape returned by these GETs.
 
+## Software (local catalog) — read + patch detection
+
+```
+GET   /api/v1/software/local?Filters=...&Page=1&PageSize=50
+GET   /api/v1/software/local/{softwareIdentifier}
+PATCH /api/v1/software/local/{softwareIdentifier}   # UpdateLocalSoftwareRequestBody
+```
+
+Requires `software:manage`. PATCH is **replace-style for the fields you send** — GET the record,
+rebuild `UpdateLocalSoftwareRequestBody` (string enums for `detectionMethod` /
+`softwareTableNameSearchMode` / `upgradeStrategy` / license fields; `*ScriptType` as `Global`|`Local`
+for each script id you keep), change only what you intend, PATCH, then GET read-back.
+
+**Detection triage pattern (verified):** when sessions Install/Repair because software is “missing”
+but inventory already shows the app:
+
+1. Compare `softwareTableName` (+ search mode) to `GET /computers/{id}/detected-computer-software`
+   `.softwareName`.
+2. Prefer `softwareTableNameSearchMode = Regex` + anchored `(?i)^ExactName$` over `Contains` for
+   short names (`Contains` `UNIFI` also hits **Chaos Unified Login**).
+3. Validate with a **read-only** `scripts/run` Metascript preview (below) before fleet maintenance.
+4. Pilot install with `run-immy-service-new` on one computer.
+
 ## Maintenance tasks (= "Config Tasks" in the UI)
 
 ```
@@ -144,14 +167,63 @@ $payload = [ordered]@{
         name   = "my-script-name"   # required
         action = $scriptContent     # PS code string
         scriptLanguage         = 2  # 2 = PowerShell
-        scriptExecutionContext = 0  # confirm the right int for your case — see scripting-guide.md gotcha
-        timeout = 60
+        scriptExecutionContext = 2  # Metascript (confirmed) when using Invoke-ImmyCommand
+        timeout = 90
     }
     body       = @{}
     computerId = <computerId>
 } | ConvertTo-Json -Depth 5
 Invoke-RestMethod -Method Post -Uri "$immyBase/api/v1/scripts/run" -Headers $headers -Body $payload
 ```
+
+For **detection previews**, keep the script strictly read-only: Metascript + `Invoke-ImmyCommand`
+that enumerates uninstall keys / applies the same Regex as `softwareTableName`, returns JSON like
+`WouldDetectRegex` / `ExactMatches` / `NearMissExcluded`. Do **not** call installers from
+`scripts/run` when the ask is “preview detection.”
+
+## Ad-hoc software install / detection-only via `run-immy-service-new`
+
+```powershell
+$sessionGroupId = [guid]::NewGuid().ToString()
+$body = [ordered]@{
+    computers = @(@{ computerId = <computerId> })
+    maintenanceParams = [ordered]@{
+        maintenanceIdentifier = '<softwareId>'   # string
+        maintenanceType       = 'LocalSoftware'  # or GlobalSoftware
+        desiredSoftwareState  = 'LatestVersion'  # 5
+        repair                = $false
+    }
+    offlineBehavior                    = 'ApplyOnConnect'  # or Skip
+    rebootPreference                   = 'Suppress'
+    suppressRebootsDuringBusinessHours = $true   # set false when Force reboot must happen in-window
+    fullMaintenance                    = $false
+    detectionOnly                      = $false  # true = evaluate only, no install/set
+    inventoryOnly                      = $false
+    resolutionOnly                     = $false
+    cacheOnly                          = $false  # true = download only, no execute
+    useWinningDeployment               = $false
+    sessionGroupId                     = $sessionGroupId
+    # omit updateTime => run immediately
+} | ConvertTo-Json -Depth 6
+
+# Background endpoint often returns 202 with empty body when sessionGroupId is set
+Invoke-WebRequest -Method Post -Uri "$immyBase/api/v1/run-immy-service-new" `
+    -Headers $headers -Body $body -ContentType 'application/json'
+```
+
+**Phase flags (mutually useful for “preview” asks):**
+
+| Flag | Effect |
+|---|---|
+| `detectionOnly` | Run detection / decide actions — **no** installs, removals, or task sets |
+| `inventoryOnly` | Inventory capture only |
+| `resolutionOnly` | Preview winning-deployment resolution without applying |
+| `cacheOnly` | Download/stage payloads without executing |
+
+After **202**, find the session: `/api/v1/maintenance-sessions/dx` filtered by `computerId`, sort
+newest `createdDate`, then poll `GET /maintenance-sessions/{id}` (`sessionStatus`:
+`0=Passed`, `1=Running`, `2=Failed`) and `/maintenance-actions/dx` for that
+`maintenanceSessionId`. Action `result` `1=Success`; `desiredSoftwareState` `5=LatestVersion`.
 
 ## Maintenance sessions
 
@@ -162,10 +234,25 @@ Invoke-RestMethod -Method Post -Uri "$immyBase/api/v1/maintenance-sessions/rerun
 # Status
 $s = Invoke-RestMethod -Uri "$immyBase/api/v1/maintenance-sessions/<sessionId>" -Headers $headers
 # sessionStatus / executionStageStatus: 0=Passed, 1=Running, 2=Failed
+
+# Actions for one session (OR across session IDs is NOT supported — one call per id)
+$filter = [uri]::EscapeDataString('[["maintenanceSessionId","=",1322918]]')
+$acts = Invoke-RestMethod -Uri "$immyBase/api/v1/maintenance-actions/dx?skip=0&take=500&requireTotalCount=false&filter=$filter" -Headers $headers
+# result: 0=Pending, 1=Success, 2=Failed, 3=Cancelled, 4=Indeterminable, 5=Resolved
+# Failures often set resultReasonMessage (e.g. script timeout, "No version of X was found")
+
+# Person for follow-up @mentions — list /computers?tenantId= often omits primaryPerson; use per-ID:
+$c = Invoke-RestMethod -Uri "$immyBase/api/v1/computers/<computerId>" -Headers $headers
+# $c.primaryPerson.displayName / emailAddress
 ```
 
 List-style maintenance-session GETs (e.g. `?computerId=X`) return the HTML SPA, not JSON — only
 per-ID GETs work through the API.
+
+**Post-deploy follow-up:** after timed/overnight installs, always re-check these endpoints and
+customer-@mention on the Thread ticket from live Success/Failed (see SKILL.md
+“Post-session follow-up”). Prefer recorded session IDs over wide `/dx` hunts.
+
 
 ### DevExtreme `/dx` grids — how to query them at scale
 
@@ -394,6 +481,11 @@ query params instead: `name` (string, exact-ish match), `tenantId`, `orderByUpda
 Invoke-RestMethod -Uri "$immyBase/api/v1/computers?name=EXAMPLE-LT01&pageSize=5" -Headers $headers
 # -> { id, name, tenant, tenantId, online, updatedDate, excludeFromMaintenance }
 ```
+`GET /api/v1/computers/{id}` uses **`computerName`** (not `name`) plus `isOnline`, `tenantId`,
+`primaryPerson`, etc. The unfiltered computers list is often **not a complete fleet dump** — for
+“all online boxes in tenant X,” Thread MCP `search_immybot_computers` (with `tenant_id` /
+`online`) is more reliable than assuming `GET /computers` returned everyone.
+
 Don't assume every list endpoint shares the same query-param convention — check
 `$sw.paths.'/api/v1/<route>'.get.parameters` for the specific route before guessing.
 
@@ -427,12 +519,95 @@ assignment** in the API, id shown in the UI URL. There is no plain `GET /api/v1/
   shape (ideally by having someone pull it up in the UI, which shows the live values directly) before
   constructing the payload, or just make the edit through the UI instead.
 
+## Tenants, enroll scripts, inventory, and tenant-scoped deployments
+
+Deep playbook (gates, RNS sticky facts, evidence labels):
+`references/tenant-onboarding-and-deployments.md`.
+
+### Create + activate tenant
+
+```powershell
+# POST /api/v1/tenants  (CreateTenantRequestBody)
+$body = @{
+  name = 'Customer Name (CODE)'
+  slug = 'CODE'
+  ownerTenantId = 1          # Logic TCG MSP
+  isMsp = $false
+  principalId = $null        # set only when linking Azure AD
+} | ConvertTo-Json
+$tenant = Invoke-RestMethod -Method Post -Uri "$immyBase/api/v1/tenants" -Headers $headers -Body $body
+
+# PATCH /api/v1/tenants/activate/{id}  (POST returns 405)
+Invoke-RestMethod -Method Patch -Uri "$immyBase/api/v1/tenants/activate/$($tenant.id)" -Headers $headers | Out-Null
+```
+
+### Agent install script without auto-onboarding (ImmyBot Agent provider)
+
+LogicTCG provider-link id **2** (`ImmyBot Agent`) does **not** support
+`.../powershell-install-script` (NotSupported). Use the with-onboarding route and set
+`automaticallyOnboard = false`. Never log or commit the `.script` body.
+
+```powershell
+$payload = @{
+  platform = 'Windows'
+  targetExternalClientId = "$($tenant.id)"   # string; matches agent client externalClientId
+  onboardingOptions = @{
+    automaticallyOnboard = $false
+    onboardingSessionSendFollowUpEmail = $false
+    isDevLab = $false
+  }
+} | ConvertTo-Json -Depth 5
+$scriptObj = Invoke-RestMethod -Method Post `
+  -Uri "$immyBase/api/v1/provider-links/2/agents/powershell-install-script-with-onboarding" `
+  -Headers $headers -Body $payload
+# $scriptObj.script  -> operator-local file only
+```
+
+Also useful: `POST .../clients/link-to-new-tenant` (`externalClientId`, optional `tenantName`) and
+`POST .../clients/link-to-tenant` (`clientIds[]`, `tenantId`).
+
+### Inventory for a tenant
+
+```powershell
+# Prefer existing inventory before any refresh job
+$inv = Invoke-RestMethod -Uri "$immyBase/api/v1/tenants/software-from-inventory/$tenantId" -Headers $headers
+# rows: displayName, globalSoftwareId/Name/Version, computerId/Name, person*, dateDetectedUtc
+```
+
+**Gotcha:** `GET /api/v1/computers?tenantId=X` may ignore the filter — always filter client-side on
+`.tenantId`.
+
+### Create a tenant-scoped software deployment
+
+`POST /api/v1/target-assignments` (`CreateLocalTargetAssignmentPayload`). Existing LogicTCG
+tenant-wide software rows commonly use `targetType = AllForTenant` (21) + `tenantId`:
+
+```powershell
+$assign = @{
+  maintenanceIdentifier = '1234'            # software id as string
+  maintenanceType       = 'GlobalSoftware'  # or LocalSoftware
+  targetType            = 'AllForTenant'
+  targetCategory        = 'Computer'
+  tenantId              = $tenantId
+  desiredSoftwareState  = 'UpdateIfFound'   # 7 = update if found; 'LatestVersion'/5 = install+keep current
+  targetEnforcement     = 'Required'
+  onboardingOnly        = $false
+  excluded              = $false
+  propagateToChildTenants = $false
+} | ConvertTo-Json
+$created = Invoke-RestMethod -Method Post -Uri "$immyBase/api/v1/target-assignments" `
+  -Headers $headers -Body $assign
+# Always GET read-back and confirm tenantId / desiredSoftwareState / onboardingOnly
+```
+
+`DesiredSoftwareState`: `LatestVersion=5`, `UpdateIfFound=7` (also `NotPresent=1`, `AnyVersion=2`,
+`NoAction=6`, …). Do not treat “keep updated” and “install if found” as interchangeable without
+observing the saved UI/API fields.
+
 ## Other useful route families (seen in Swagger, not yet deep-dived)
 
 - `/api/v1/dynamic-provider-types/global*` — integration/provider type definitions
-- `/api/v1/target-assignments/global*` — what a piece of software/task is assigned/scoped to
+- `/api/v1/target-assignments/global*` — global catalog assignments / overrides
 - `/api/v1/media/global*` — icons/media assets, includes `upload` and `download-url`
-- `/api/v1/provider-links/{id}/agents/*-install-script*` — generates the actual agent install script
-  (bash/PowerShell) for a given provider link, with or without onboarding baked in
-- `/api/v1/computers/{computerId}/detected-computer-software`, `/inventory-software/search-by-*` —
-  what's actually installed on a machine per inventory data
+- `/api/v1/computers/{computerId}/detected-computer-software`, `/computers/inventory-software/search-by-*` —
+  per-computer / search inventory helpers (tenant rollup is `tenants/software-from-inventory/{id}`)
